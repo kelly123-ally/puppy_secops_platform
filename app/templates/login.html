@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>登录 · PuppySecOps Platform</title>
+  <link rel="stylesheet" href="/static/styles.css?v=4" />
+</head>
+<body class="login-body">
+  <div class="login-shell">
+    <div class="login-panel glass">
+      <div class="hero-mark">P</div>
+      <div class="login-title">PuppySecOps Platform</div>
+      <div class="login-subtitle">面向 ROS 2 / PuppyPi 的安全仿真与攻防验证平台</div>
+
+      <form id="login-form" class="login-form">
+        <label>用户名</label>
+        <input name="username" placeholder="admin / operator / auditor" required />
+        <label>密码</label>
+        <input name="password" type="password" placeholder="输入密码" required />
+        <button type="submit">进入控制台</button>
+      </form>
+
+      <div id="login-error" class="error-box hidden"></div>
+
+      <div class="demo-accounts">
+        <div><strong>admin</strong> / Admin123!</div>
+        <div><strong>operator</strong> / Operator123!</div>
+        <div><strong>auditor</strong> / Auditor123!</div>
+      </div>
+    </div>
+  </div>
+    <script>
+    const existing = localStorage.getItem("psp_token");
+    if (existing) {
+      location.href = "/app";
+    }
+    const form = document.getElementById("login-form");
+    const errorBox = document.getElementById("login-error");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      errorBox.classList.add("hidden");
+      const fd = new FormData(form);
+      const payload = Object.fromEntries(fd.entries());
+      const resp = await fetch("/api/login", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      if (!resp.ok) {
+        errorBox.textContent = "登录失败，请检查用户名和密码。";
+        errorBox.classList.remove("hidden");
+        return;
+      }
+      const data = await resp.json();
+      localStorage.setItem("psp_token", data.token);
+      localStorage.setItem("psp_user", JSON.stringify(data.user));
+      location.href = "/app";
+    });
+  </script>
+</body>
+</html>

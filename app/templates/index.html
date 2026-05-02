@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PuppySecOps Platform</title>
+  <link rel="stylesheet" href="/static/styles.css?v=4" />
+</head>
+<body>
+<div id="app-shell" class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-icon">P</div>
+      <div>
+        <div class="brand-title">PuppySecOps</div>
+        <div class="brand-subtitle">ROS 2 Security Console</div>
+      </div>
+    </div>
+    <nav class="nav-list">
+      <button class="nav-item active" data-tab="overview">总体态势</button>
+      <button class="nav-item" data-tab="operations">任务与终端</button>
+      <button class="nav-item" data-tab="security">安全策略</button>
+      <button class="nav-item" data-tab="attacklab">攻击实验</button>
+      <button class="nav-item" data-tab="audit">审计日志</button>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="user-badge">
+        <span class="role-dot"></span>
+        <div>
+          <div>{{ user.display_name }}</div>
+          <div class="muted">{{ user.role }} · {{ user.username }}</div>
+        </div>
+      </div>
+      <button id="logout-btn" class="ghost-btn">退出登录</button>
+    </div>
+  </aside>
+
+  <main class="content">
+    <header class="topbar">
+      <div>
+        <div class="top-title">多机器狗安全验证面板</div>
+        <div class="top-subtitle">任务调度 · 攻击实验 · 终端吊销 · 一致性防护</div>
+      </div>
+      <div class="top-actions">
+        <span id="status-chip" class="chip chip-green">实时连接中</span>
+      </div>
+    </header>
+
+    <section id="tab-overview" class="tab-panel active">
+      <div class="metric-grid">
+        <div class="metric-card glass"><div class="metric-label">在线机器人</div><div id="m-online" class="metric-value">0</div></div>
+        <div class="metric-card glass"><div class="metric-label">执行中任务</div><div id="m-running" class="metric-value">0</div></div>
+        <div class="metric-card glass"><div class="metric-label">阻断攻击</div><div id="m-blocked" class="metric-value">0</div></div>
+        <div class="metric-card glass"><div class="metric-label">已吊销终端</div><div id="m-revoked" class="metric-value">0</div></div>
+      </div>
+
+      <div class="two-col">
+        <div class="panel glass large-panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">实时任务态势图（民用安全仿真）</div>
+              <div class="panel-subtitle">网格地图 / 障碍 / 站点 / 机器人 / 任务目标</div>
+            </div>
+          </div>
+          <canvas id="map-canvas" width="960" height="540"></canvas>
+        </div>
+
+        <div class="stack">
+          <div class="panel glass">
+            <div class="panel-header">
+              <div class="panel-title">安全态势</div>
+            </div>
+            <div id="policy-summary" class="policy-grid"></div>
+          </div>
+
+          <div class="panel glass">
+            <div class="panel-header">
+              <div class="panel-title">证书与吊销</div>
+            </div>
+            <div id="cert-list" class="list-box"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-operations" class="tab-panel">
+      <div class="three-col">
+        <div class="panel glass">
+          <div class="panel-header"><div class="panel-title">自然语言任务</div></div>
+          <form id="nl-form" class="form-grid">
+            <textarea name="text" placeholder="例如：B区急需医疗包，请派最近的一台机器狗送过去，优先级高"></textarea>
+            <button type="submit">提交自然语言任务</button>
+          </form>
+        </div>
+
+        <div class="panel glass">
+          <div class="panel-header"><div class="panel-title">结构化任务</div></div>
+          <form id="task-form" class="form-grid">
+            <select name="site">
+              <option value="zone_a">zone_a</option>
+              <option value="zone_b">zone_b</option>
+              <option value="zone_c">zone_c</option>
+              <option value="zone_d">zone_d</option>
+            </select>
+            <select name="cargo_type">
+              <option value="medical">medical</option>
+              <option value="supply">supply</option>
+              <option value="food">food</option>
+              <option value="repair">repair</option>
+            </select>
+            <select name="priority">
+              <option value="5">5 - 紧急</option>
+              <option value="4">4 - 高</option>
+              <option value="3" selected>3 - 中</option>
+              <option value="2">2 - 低</option>
+            </select>
+            <input name="note" placeholder="任务说明" />
+            <button type="submit">签名并下发任务</button>
+          </form>
+        </div>
+
+        <div class="panel glass">
+          <div class="panel-header"><div class="panel-title">机器人控制</div></div>
+          <div id="robot-controls" class="control-list"></div>
+        </div>
+      </div>
+
+      <div class="two-col">
+        <div class="panel glass">
+          <div class="panel-header"><div class="panel-title">终端状态</div></div>
+          <div id="robot-table" class="table-box"></div>
+        </div>
+        <div class="panel glass">
+          <div class="panel-header"><div class="panel-title">任务队列</div></div>
+          <div id="task-table" class="table-box"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-security" class="tab-panel">
+      <div class="two-col">
+        <div class="panel glass">
+          <div class="panel-header"><div class="panel-title">策略开关</div></div>
+          <div id="policy-controls" class="policy-control-list"></div>
+        </div>
+        <div class="panel glass">
+          <div class="panel-header"><div class="panel-title">安全指标</div></div>
+          <div id="security-metrics" class="metric-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-attacklab" class="tab-panel">
+      <div class="three-col">
+        <div class="panel glass">
+          <div class="panel-header"><div class="panel-title">攻击注入</div></div>
+          <div class="button-stack">
+            <button class="danger-btn" data-attack="unsigned_injection">未签名任务注入</button>
+            <button class="danger-btn" data-attack="replay">重放旧任务 nonce</button>
+            <button class="danger-btn" data-attack="heartbeat_spoof">伪造心跳</button>
+            <button class="danger-btn" data-attack="compromise">模拟终端失陷</button>
+          </div>
+          <div class="inline-hint">系统只做本地仿真与防御验证，不用于真实攻击。</div>
+        </div>
+
+        <div class="panel glass">
+          <div class="panel-header"><div class="panel-title">攻击参数</div></div>
+          <div class="form-grid">
+            <select id="attack-site">
+              <option value="zone_a">zone_a</option>
+              <option value="zone_b" selected>zone_b</option>
+              <option value="zone_c">zone_c</option>
+              <option value="zone_d">zone_d</option>
+            </select>
+            <select id="attack-robot">
+              <option value="dog1">dog1</option>
+              <option value="dog2">dog2</option>
+              <option value="dog3">dog3</option>
+              <option value="dog4">dog4</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="panel glass">
+          <div class="panel-header"><div class="panel-title">最近攻击结果</div></div>
+          <div id="attack-log" class="list-box"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-audit" class="tab-panel">
+      <div class="panel glass">
+        <div class="panel-header"><div class="panel-title">安全审计流</div></div>
+        <div id="audit-stream" class="audit-stream"></div>
+      </div>
+    </section>
+  </main>
+</div>
+<script>
+window.__BOOT_USER__ = {{ user | tojson }};
+</script>
+<script src="/static/app.js?v=4"></script>
+</body>
+</html>
