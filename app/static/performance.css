@@ -1,0 +1,27 @@
+/* 性能优化：仅禁用非关键动画 */
+
+/* 禁用加载动画 */
+.loading-spinner,
+.loading-overlay {
+    display: none !important;
+}
+
+/* 简化按钮效果 */
+button:hover:not(.danger-btn),
+.btn:hover {
+    transform: none !important;
+}
+
+/* 禁用涟漪效果 */
+.ripple {
+    display: none !important;
+}
+
+/* 简化卡片阴影 */
+.card,
+.robot-card,
+.task-card {
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1) !important;
+}
+
+/* 保留通知动画 */

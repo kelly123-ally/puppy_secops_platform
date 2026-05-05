@@ -166,6 +166,45 @@ async def api_attack_compromise(request: Request, payload: dict = Body(...)):
     return simulator.compromise_robot(payload["robot_id"])
 
 
+@router.post("/api/attacks/mitm")
+async def api_attack_mitm(request: Request, payload: dict = Body(...)):
+    require_roles(request, {"admin", "auditor"})
+    simulator = get_simulator(request.app)
+    return simulator.attack_mitm(
+        robot_id=payload.get("robot_id", "dog1"),
+        target_site=payload.get("site", "zone_b")
+    )
+
+
+@router.post("/api/attacks/ddos")
+async def api_attack_ddos(request: Request, payload: dict = Body(...)):
+    require_roles(request, {"admin", "auditor"})
+    simulator = get_simulator(request.app)
+    return simulator.attack_ddos(
+        target=payload.get("target", "control_center"),
+        intensity=payload.get("intensity", "medium")
+    )
+
+
+@router.post("/api/attacks/privilege_escalation")
+async def api_attack_privilege_escalation(request: Request, payload: dict = Body(...)):
+    require_roles(request, {"admin", "auditor"})
+    simulator = get_simulator(request.app)
+    return simulator.attack_privilege_escalation(
+        robot_id=payload.get("robot_id", "dog1"),
+        target_role=payload.get("target_role", "admin")
+    )
+
+
+@router.post("/api/attacks/cert_forge")
+async def api_attack_cert_forge(request: Request, payload: dict = Body(...)):
+    require_roles(request, {"admin", "auditor"})
+    simulator = get_simulator(request.app)
+    return simulator.attack_cert_forge(
+        robot_id=payload.get("robot_id", "dog1")
+    )
+
+
 @router.websocket("/ws/stream")
 async def ws_stream(websocket: WebSocket):
     token = websocket.query_params.get("token") or websocket.cookies.get("session_token")

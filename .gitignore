@@ -1,0 +1,80 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Kiro
+.kiro/
+
+# 敏感文件 - API密钥和证书
+.env
+*.pem
+*.key
+*.bin
+audit_events.json
+audit_signing_key.pem
+ca_cert.pem
+ca_key.pem
+master_key.bin
+genesis_hash.txt
+crl.json
+threat_intelligence.json
+
+# 测试文件
+test_*.json
+test_*.txt
+test_*.pem
+test_*.html
+
+# 备份文件
+*.backup
+*.backup_*
+*.bak
+
+# Hypothesis
+.hypothesis/
+
+# Pytest
+.pytest_cache/
+
+# 日志文件
+*.log
+
+# 临时文件
+*.tmp
+*.temp
+
+# 配置文件（保留示例）
+# .env 文件包含敏感信息，不应提交
+# 但保留 .env.example 作为模板

@@ -1,0 +1,94 @@
+# Security Configuration Example for PuppySecOps Platform
+#
+# This file demonstrates all supported configuration sections.
+# Copy this file and customize it for your deployment.
+
+# TLS/SSL Configuration for WebSocket Server
+tls:
+  cert_path: ca_cert.pem
+  key_path: ca_key.pem
+  protocols:
+    - TLSv1.2
+    - TLSv1.3
+  # Optional: Specify allowed cipher suites
+  # cipher_suites:
+  #   - TLS_AES_256_GCM_SHA384
+  #   - TLS_CHACHA20_POLY1305_SHA256
+
+# Key Rotation Policy
+key_rotation:
+  # Hours between automatic key rotations (1-720)
+  rotation_interval_hours: 24
+  # Minutes to keep old key valid for in-flight messages
+  grace_period_minutes: 5
+  # Whether to automatically rotate the master key
+  auto_rotate_master_key: false
+
+# API Rate Limiting Policies
+rate_limits:
+  # Rate limit for task management endpoints
+  - endpoint_pattern: "/api/tasks/*"
+    requests_per_window: 100
+    window_seconds: 60
+    role_overrides:
+      admin: 200
+      operator: 150
+  
+  # Rate limit for robot control endpoints
+  - endpoint_pattern: "/api/robots/*"
+    requests_per_window: 50
+    window_seconds: 60
+    role_overrides:
+      admin: 100
+  
+  # Rate limit for authentication endpoints
+  - endpoint_pattern: "/api/auth/*"
+    requests_per_window: 10
+    window_seconds: 60
+
+# Anomaly Detection Configuration
+anomaly_detection:
+  # Hours of historical data to use for baseline
+  baseline_window_hours: 24
+  # Z-score threshold for anomaly detection
+  z_score_threshold: 3.0
+  # Sensitivity level: low, medium, high
+  sensitivity: medium
+  # Features to monitor for anomalies
+  monitored_features:
+    - battery_level
+    - task_completion_time
+    - message_frequency
+    - movement_speed
+
+# Incident Response Rules
+incident_response:
+  # Automatically revoke certificate for critical anomalies
+  - alert_category: anomaly
+    severity_threshold: critical
+    actions:
+      - revoke_cert
+      - block_client
+    auto_execute: true
+  
+  # Block client after repeated authentication failures
+  - alert_category: auth_failure
+    severity_threshold: high
+    actions:
+      - block_client
+    auto_execute: true
+  
+  # Extend rate limit for repeated violations
+  - alert_category: rate_limit_violation
+    severity_threshold: medium
+    actions:
+      - extend_rate_limit
+    auto_execute: true
+
+# Multi-Factor Authentication Requirements
+# Maps role names to whether MFA is required
+mfa_requirements:
+  admin: true
+  operator: true
+  robot: false
+  guest: false

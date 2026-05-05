@@ -3,59 +3,127 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="登录 PuppySecOps Platform - 面向 ROS 2 / PuppyPi 的安全仿真与攻防验证平台" />
+  <meta name="theme-color" content="#0b1020" />
   <title>登录 · PuppySecOps Platform</title>
-  <link rel="stylesheet" href="/static/styles.css?v=4" />
+  <link rel="stylesheet" href="/static/styles.css?v=5" />
+  <style>
+    /* 防止闪烁 */
+    .login-body {
+      opacity: 0;
+      animation: fadeIn 0.3s ease-out forwards;
+    }
+    @keyframes fadeIn {
+      to { opacity: 1; }
+    }
+  </style>
 </head>
 <body class="login-body">
   <div class="login-shell">
-    <div class="login-panel glass">
-      <div class="hero-mark">P</div>
-      <div class="login-title">PuppySecOps Platform</div>
-      <div class="login-subtitle">面向 ROS 2 / PuppyPi 的安全仿真与攻防验证平台</div>
+    <div class="login-panel glass" role="main">
+      <div class="hero-mark" aria-hidden="true">P</div>
+      <h1 class="login-title">PuppySecOps Platform</h1>
+      <p class="login-subtitle">面向 ROS 2 / PuppyPi 的安全仿真与攻防验证平台</p>
 
-      <form id="login-form" class="login-form">
-        <label>用户名</label>
-        <input name="username" placeholder="admin / operator / auditor" required />
-        <label>密码</label>
-        <input name="password" type="password" placeholder="输入密码" required />
-        <button type="submit">进入控制台</button>
+      <form id="login-form" class="login-form" aria-label="登录表单">
+        <label for="username">用户名</label>
+        <input 
+          id="username" 
+          name="username" 
+          type="text"
+          placeholder="admin / operator / auditor" 
+          required 
+          autocomplete="username"
+          aria-required="true"
+        />
+        <label for="password">密码</label>
+        <input 
+          id="password"
+          name="password" 
+          type="password" 
+          placeholder="输入密码" 
+          required 
+          autocomplete="current-password"
+          aria-required="true"
+        />
+        <button type="submit" id="login-submit-btn">进入控制台</button>
       </form>
 
-      <div id="login-error" class="error-box hidden"></div>
+      <div id="login-error" class="error-box hidden" role="alert" aria-live="assertive"></div>
 
-      <div class="demo-accounts">
+      <div class="demo-accounts" role="complementary" aria-label="演示账户">
+        <p style="margin-bottom: 8px; color: var(--muted); font-size: 13px;">演示账户：</p>
         <div><strong>admin</strong> / Admin123!</div>
         <div><strong>operator</strong> / Operator123!</div>
         <div><strong>auditor</strong> / Auditor123!</div>
       </div>
     </div>
   </div>
-    <script>
+  <script>
+    // 检查是否已登录
     const existing = localStorage.getItem("psp_token");
     if (existing) {
       location.href = "/app";
     }
+    
     const form = document.getElementById("login-form");
     const errorBox = document.getElementById("login-error");
+    const submitBtn = document.getElementById("login-submit-btn");
+    
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       errorBox.classList.add("hidden");
-      const fd = new FormData(form);
-      const payload = Object.fromEntries(fd.entries());
-      const resp = await fetch("/api/login", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(payload)
-      });
-      if (!resp.ok) {
-        errorBox.textContent = "登录失败，请检查用户名和密码。";
+      
+      // 禁用提交按钮防止重复提交
+      submitBtn.disabled = true;
+      submitBtn.textContent = "登录中...";
+      
+      try {
+        const fd = new FormData(form);
+        const payload = Object.fromEntries(fd.entries());
+        
+        const resp = await fetch("/api/login", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload)
+        });
+        
+        if (!resp.ok) {
+          const errorText = await resp.text();
+          errorBox.textContent = errorText || "登录失败，请检查用户名和密码。";
+          errorBox.classList.remove("hidden");
+          submitBtn.disabled = false;
+          submitBtn.textContent = "进入控制台";
+          return;
+        }
+        
+        const data = await resp.json();
+        localStorage.setItem("psp_token", data.token);
+        localStorage.setItem("psp_user", JSON.stringify(data.user));
+        
+        // 显示成功消息
+        submitBtn.textContent = "登录成功！";
+        submitBtn.style.background = "linear-gradient(135deg, #4ce39a, #78ffd6)";
+        
+        // 延迟跳转以显示成功状态
+        setTimeout(() => {
+          location.href = "/app";
+        }, 500);
+        
+      } catch (error) {
+        console.error('[Login] Error:', error);
+        errorBox.textContent = "网络错误，请稍后重试。";
         errorBox.classList.remove("hidden");
-        return;
+        submitBtn.disabled = false;
+        submitBtn.textContent = "进入控制台";
       }
-      const data = await resp.json();
-      localStorage.setItem("psp_token", data.token);
-      localStorage.setItem("psp_user", JSON.stringify(data.user));
-      location.href = "/app";
+    });
+    
+    // 键盘快捷键：Enter 提交表单
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !submitBtn.disabled) {
+        form.requestSubmit();
+      }
     });
   </script>
 </body>

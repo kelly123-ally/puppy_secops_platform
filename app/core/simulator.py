@@ -61,6 +61,16 @@ class FleetSimulator:
 
         self.running = True
         self.last_tick = time.time()
+        
+        # Anomaly detection integration (Task 21.4)
+        self.anomaly_detector = None  # Will be set by application
+        self.alert_system = None  # Will be set by application
+        self.robot_task_start_times: Dict[str, float] = {}  # Track task start times
+        self.robot_message_counts: Dict[str, int] = {}  # Track message frequency
+        self.robot_last_message_time: Dict[str, float] = {}  # Track last message time
+        
+        # Audit logger integration (for Security Dashboard)
+        self.audit_logger = None  # Will be set by application
 
         self._seed_demo_events()
 
@@ -94,7 +104,163 @@ class FleetSimulator:
         self.log("info", "policy", "strict_mode_enabled", self.policies.to_dict())
 
     def log(self, level: str, category: str, title: str, details: Dict[str, Any]) -> None:
+        # Log to internal deque for backward compatibility
         self.audit_log.appendleft(AuditEvent(ts=time.time(), level=level, category=category, title=title, details=details))
+        
+        # Also log to AuditLogger if available (for Security Dashboard)
+        if self.audit_logger:
+            self.audit_logger.log_event(
+                category=category,
+                title=title,
+                actor=details.get("actor", "system"),
+                details=details
+            )
+    
+    def set_anomaly_detector(self, anomaly_detector) -> None:
+        """Set anomaly detector for robot behavior monitoring (Task 21.4).
+        
+        Args:
+            anomaly_detector: AnomalyDetector instance
+        """
+        self.anomaly_detector = anomaly_detector
+    
+    def set_alert_system(self, alert_system) -> None:
+        """Set alert system for generating anomaly alerts (Task 21.4).
+        
+        Args:
+            alert_system: AlertSystem instance
+        """
+        self.alert_system = alert_system
+    
+    def set_audit_logger(self, audit_logger) -> None:
+        """Set audit logger for centralized audit logging.
+        
+        Args:
+            audit_logger: AuditLogger instance
+        """
+        self.audit_logger = audit_logger
+    
+    def _collect_robot_metrics(self, robot: Robot) -> Optional[Any]:
+        """Collect behavior metrics for anomaly detection (Task 21.4).
+        
+        Implements Requirement 17.1: Monitor movement patterns, task completion times,
+        battery consumption, and message frequency.
+        
+        Args:
+            robot: Robot to collect metrics from
+            
+        Returns:
+            RobotMetrics object or None if anomaly detector not available
+        """
+        if not self.anomaly_detector:
+            return None
+        
+        # Import RobotMetrics here to avoid circular dependency
+        from .anomaly_detector import RobotMetrics
+        
+        # Calculate task completion time if task just completed
+        task_completion_time = None
+        if robot.current_task_id and robot.current_task_id in self.robot_task_start_times:
+            task_completion_time = time.time() - self.robot_task_start_times[robot.current_task_id]
+        
+        # Calculate message frequency (messages per minute)
+        now = time.time()
+        robot_id = robot.robot_id
+        
+        # Update message count
+        if robot_id not in self.robot_message_counts:
+            self.robot_message_counts[robot_id] = 0
+            self.robot_last_message_time[robot_id] = now
+        
+        self.robot_message_counts[robot_id] += 1
+        
+        # Calculate frequency over last minute
+        time_elapsed = now - self.robot_last_message_time[robot_id]
+        if time_elapsed >= 60.0:  # Reset every minute
+            message_frequency = self.robot_message_counts[robot_id] / (time_elapsed / 60.0)
+            self.robot_message_counts[robot_id] = 0
+            self.robot_last_message_time[robot_id] = now
+        else:
+            # Estimate frequency based on current rate
+            if time_elapsed > 0:
+                message_frequency = self.robot_message_counts[robot_id] / (time_elapsed / 60.0)
+            else:
+                message_frequency = 0.0
+        
+        # Calculate movement speed (cells per second)
+        # Approximate based on robot's speed_cells attribute
+        movement_speed = robot.speed_cells if hasattr(robot, 'speed_cells') else 1.0
+        
+        # Create metrics object
+        metrics = RobotMetrics(
+            robot_id=robot_id,
+            timestamp=now,
+            position=(robot.x, robot.y),
+            battery_level=robot.battery,
+            task_completion_time=task_completion_time,
+            message_frequency=message_frequency,
+            movement_speed=movement_speed
+        )
+        
+        return metrics
+    
+    def _analyze_robot_behavior(self, robot: Robot) -> None:
+        """Analyze robot behavior for anomalies and generate alerts (Task 21.4).
+        
+        Implements Requirements:
+        - 17.1: Collect robot behavior metrics
+        - 17.3: Generate alerts for detected anomalies
+        
+        Args:
+            robot: Robot to analyze
+        """
+        if not self.anomaly_detector or not self.alert_system:
+            return
+        
+        # Collect current metrics
+        metrics = self._collect_robot_metrics(robot)
+        if not metrics:
+            return
+        
+        # Update baseline with current metrics
+        self.anomaly_detector.update_baseline(robot.robot_id, metrics)
+        
+        # Detect anomalies (only if we have sufficient baseline data)
+        anomaly_score, anomalous_features, alert_generated = \
+            self.anomaly_detector.detect_and_log_anomaly(robot.robot_id, metrics)
+        
+        # Generate alert if anomaly detected and threshold exceeded
+        if alert_generated and anomalous_features:
+            # Determine severity based on anomaly score
+            if anomaly_score >= 5.0:
+                severity = "critical"
+            elif anomaly_score >= 4.0:
+                severity = "high"
+            elif anomaly_score >= 3.0:
+                severity = "medium"
+            else:
+                severity = "low"
+            
+            # Generate alert asynchronously
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                loop.create_task(self.alert_system.generate_alert(
+                    severity=severity,
+                    category="anomaly_critical" if severity == "critical" else "anomaly",
+                    subject=robot.robot_id,
+                    title=f"Anomalous behavior detected for {robot.robot_id}",
+                    details={
+                        "anomaly_score": anomaly_score,
+                        "anomalous_features": anomalous_features,
+                        "battery_level": robot.battery,
+                        "position": (robot.x, robot.y),
+                        "status": robot.status
+                    }
+                ))
+            except RuntimeError:
+                # No event loop available (e.g., during testing)
+                pass
 
     def snapshot(self) -> Dict[str, Any]:
         with self.lock:
@@ -296,6 +462,9 @@ class FleetSimulator:
         robot.current_lease_id = lease_id
         robot.path = list(proposed_path)
         robot.assigned_site = payload["site"]
+        
+        # Track task start time for completion time metrics (Task 21.4)
+        self.robot_task_start_times[task_id] = time.time()
 
         self.log("info", "robot", "assignment_accepted", {
             "robot_id": robot_id,
@@ -388,6 +557,9 @@ class FleetSimulator:
         # 注意：位置与状态可以作为观测更新，但不覆盖本地 revoked/paused 标志
         robot.x = int(payload["x"])
         robot.y = int(payload["y"])
+        
+        # Analyze robot behavior for anomalies (Task 21.4)
+        self._analyze_robot_behavior(robot)
 
     # -----------------------------
     # LBSE 关键原语：CompleteTask
@@ -755,6 +927,164 @@ class FleetSimulator:
             self.log("critical", "attack", "robot_marked_compromised", {"robot_id": robot_id})
             self.attack_log.appendleft({"ts": time.time(), "type": "compromise_robot", "result": "success", "robot_id": robot_id})
             return {"ok": True}
+
+    def attack_mitm(self, robot_id: str, target_site: str) -> Dict[str, Any]:
+        """中间人攻击 - 尝试拦截机器人与控制中心的通信"""
+        with self.lock:
+            robot = self.robots.get(robot_id)
+            if not robot:
+                return {"ok": False, "reason": "robot_not_found"}
+            
+            # 检查是否有加密保护
+            if self.policies.require_signed_commands:
+                # 有签名保护，攻击被阻断
+                self.security_metrics["blocked_spoofs"] += 1
+                self.attack_log.appendleft({
+                    "ts": time.time(), 
+                    "type": "mitm_attack", 
+                    "result": "blocked",
+                    "robot_id": robot_id,
+                    "reason": "encrypted_channel"
+                })
+                self.log("warn", "attack", "mitm_blocked", {
+                    "robot_id": robot_id, 
+                    "target_site": target_site,
+                    "reason": "channel_encryption_active"
+                })
+                return {"ok": False, "reason": "encrypted_channel"}
+            else:
+                # 无保护，攻击成功
+                self.attack_log.appendleft({
+                    "ts": time.time(), 
+                    "type": "mitm_attack", 
+                    "result": "success",
+                    "robot_id": robot_id
+                })
+                self.log("critical", "attack", "mitm_succeeded", {
+                    "robot_id": robot_id,
+                    "target_site": target_site
+                })
+                return {"ok": True, "intercepted": True}
+
+    def attack_ddos(self, target: str, intensity: str = "medium") -> Dict[str, Any]:
+        """DDoS攻击 - 大量请求淹没系统"""
+        with self.lock:
+            # 根据强度计算请求数量
+            request_counts = {"low": 100, "medium": 500, "high": 1000}
+            request_count = request_counts.get(intensity, 500)
+            
+            # 检查是否有速率限制保护
+            if self.policies.strict_mode:
+                # 严格模式下有速率限制，攻击被阻断
+                self.security_metrics["blocked_injections"] += 1
+                self.attack_log.appendleft({
+                    "ts": time.time(),
+                    "type": "ddos_attack",
+                    "result": "blocked",
+                    "target": target,
+                    "intensity": intensity,
+                    "requests": request_count,
+                    "reason": "rate_limit_active"
+                })
+                self.log("warn", "attack", "ddos_blocked", {
+                    "target": target,
+                    "intensity": intensity,
+                    "requests": request_count,
+                    "reason": "rate_limiting"
+                })
+                return {"ok": False, "reason": "rate_limit_protection"}
+            else:
+                # 无保护，系统可能受影响
+                self.attack_log.appendleft({
+                    "ts": time.time(),
+                    "type": "ddos_attack",
+                    "result": "partial_success",
+                    "target": target,
+                    "intensity": intensity,
+                    "requests": request_count
+                })
+                self.log("critical", "attack", "ddos_partial", {
+                    "target": target,
+                    "intensity": intensity,
+                    "requests": request_count
+                })
+                return {"ok": True, "impact": "system_slowdown"}
+
+    def attack_privilege_escalation(self, robot_id: str, target_role: str = "admin") -> Dict[str, Any]:
+        """权限提升攻击 - 尝试获取更高权限"""
+        with self.lock:
+            robot = self.robots.get(robot_id)
+            if not robot:
+                return {"ok": False, "reason": "robot_not_found"}
+            
+            # 检查是否有权限校验
+            if self.policies.least_privilege_topics:
+                # 有最小权限保护，攻击被阻断
+                self.security_metrics["blocked_injections"] += 1
+                self.attack_log.appendleft({
+                    "ts": time.time(),
+                    "type": "privilege_escalation",
+                    "result": "blocked",
+                    "robot_id": robot_id,
+                    "target_role": target_role,
+                    "reason": "privilege_check_active"
+                })
+                self.log("warn", "attack", "privilege_escalation_blocked", {
+                    "robot_id": robot_id,
+                    "target_role": target_role,
+                    "reason": "least_privilege_enforcement"
+                })
+                return {"ok": False, "reason": "privilege_check_failed"}
+            else:
+                # 无保护，攻击可能成功
+                self.attack_log.appendleft({
+                    "ts": time.time(),
+                    "type": "privilege_escalation",
+                    "result": "success",
+                    "robot_id": robot_id,
+                    "target_role": target_role
+                })
+                self.log("critical", "attack", "privilege_escalation_succeeded", {
+                    "robot_id": robot_id,
+                    "target_role": target_role
+                })
+                return {"ok": True, "escalated": True}
+
+    def attack_cert_forge(self, robot_id: str) -> Dict[str, Any]:
+        """证书伪造攻击 - 尝试伪造合法证书"""
+        with self.lock:
+            robot = self.robots.get(robot_id)
+            if not robot:
+                return {"ok": False, "reason": "robot_not_found"}
+            
+            # 检查证书是否已被吊销或有验证机制
+            if robot.revoked or self.policies.auto_revoke_compromised:
+                # 有证书验证，攻击被阻断
+                self.security_metrics["blocked_spoofs"] += 1
+                self.attack_log.appendleft({
+                    "ts": time.time(),
+                    "type": "cert_forge",
+                    "result": "blocked",
+                    "robot_id": robot_id,
+                    "reason": "cert_validation_active"
+                })
+                self.log("warn", "attack", "cert_forge_blocked", {
+                    "robot_id": robot_id,
+                    "reason": "certificate_validation"
+                })
+                return {"ok": False, "reason": "cert_validation_failed"}
+            else:
+                # 无保护，伪造可能成功
+                self.attack_log.appendleft({
+                    "ts": time.time(),
+                    "type": "cert_forge",
+                    "result": "success",
+                    "robot_id": robot_id
+                })
+                self.log("critical", "attack", "cert_forge_succeeded", {
+                    "robot_id": robot_id
+                })
+                return {"ok": True, "forged": True}
 
     # -----------------------------
     # 运行控制接口

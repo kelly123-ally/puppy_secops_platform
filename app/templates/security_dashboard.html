@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Security Dashboard - PuppySecOps Platform</title>
+  <link rel="stylesheet" href="/static/styles.css?v=6" />
+  <link rel="stylesheet" href="/static/security_dashboard.css?v=2" />
+  <!-- Chart.js for metrics visualization -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <!-- Chart.js date adapter for time series -->
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+</head>
+<body>
+<div id="app-shell" class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-icon">P</div>
+      <div>
+        <div class="brand-title">PuppySecOps</div>
+        <div class="brand-subtitle">Security Dashboard</div>
+      </div>
+    </div>
+    <nav class="nav-list">
+      <button class="nav-item" onclick="window.location.href='/app'">Main Dashboard</button>
+      <button class="nav-item active">Security Monitoring</button>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="user-badge">
+        <span class="role-dot"></span>
+        <div>
+          <div>{{ user.display_name }}</div>
+          <div class="muted">{{ user.role }} · {{ user.username }}</div>
+        </div>
+      </div>
+      <button id="logout-btn" class="ghost-btn" onclick="window.location.href='/api/logout'">Logout</button>
+    </div>
+  </aside>
+
+  <main class="content">
+    <header class="topbar">
+      <div>
+        <div class="top-title">Security Monitoring Dashboard</div>
+        <div class="top-subtitle">Real-time security metrics, alerts, and threat intelligence</div>
+      </div>
+      <div class="top-actions">
+        <div class="connection-status">
+          <span id="metrics-status" class="status-indicator">●</span> Metrics
+          <span id="alerts-status" class="status-indicator">●</span> Alerts
+        </div>
+      </div>
+    </header>
+
+    <!-- Dashboard Controls -->
+    <div class="dashboard-controls glass">
+      <div class="control-group">
+        <label>Time Range:</label>
+        <select id="time-range-select" class="control-select">
+          <option value="last_hour" selected>Last Hour</option>
+          <option value="last_24h">Last 24 Hours</option>
+          <option value="last_7d">Last 7 Days</option>
+          <option value="custom">Custom Range</option>
+        </select>
+        <div id="custom-range-inputs" class="custom-range-inputs" style="display: none;">
+          <input type="datetime-local" id="start-time" class="control-input" />
+          <input type="datetime-local" id="end-time" class="control-input" />
+          <button id="apply-custom-range" class="control-btn">Apply</button>
+        </div>
+      </div>
+      
+      <div class="control-group">
+        <label>Robot ID:</label>
+        <select id="robot-filter" class="control-select">
+          <option value="all" selected>All Robots</option>
+          <option value="dog1">dog1</option>
+          <option value="dog2">dog2</option>
+          <option value="dog3">dog3</option>
+          <option value="dog4">dog4</option>
+        </select>
+      </div>
+      
+      <div class="control-group">
+        <label>Category:</label>
+        <select id="category-filter" class="control-select">
+          <option value="all" selected>All Categories</option>
+          <option value="authentication">Authentication</option>
+          <option value="authorization">Authorization</option>
+          <option value="key_rotation">Key Rotation</option>
+          <option value="anomaly">Anomaly</option>
+          <option value="threat_blocked">Threat Blocked</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Security Metrics Cards -->
+    <div class="dashboard-metrics">
+      <div class="metric-card glass">
+        <div class="metric-label">Blocked Attacks</div>
+        <div id="metric-blocked-attacks" class="metric-value">-</div>
+      </div>
+      <div class="metric-card glass">
+        <div class="metric-label">Active Robots</div>
+        <div id="metric-active-robots" class="metric-value">-</div>
+      </div>
+      <div class="metric-card glass">
+        <div class="metric-label">Revoked Certificates</div>
+        <div id="metric-revoked-certs" class="metric-value">-</div>
+      </div>
+      <div class="metric-card glass">
+        <div class="metric-label">Anomaly Detections</div>
+        <div id="metric-anomalies" class="metric-value">-</div>
+      </div>
+      <div class="metric-card glass">
+        <div class="metric-label">Auth Failures</div>
+        <div id="metric-auth-failures" class="metric-value">-</div>
+      </div>
+    </div>
+
+    <!-- Key Rotation Status -->
+    <div class="dashboard-key-rotation glass">
+      <h3 class="section-title">Key Rotation Status</h3>
+      <div class="key-rotation-info">
+        <div class="key-rotation-item">
+          <span class="key-rotation-label">Last Rotation:</span>
+          <span id="last-rotation" class="key-rotation-value">-</span>
+        </div>
+        <div class="key-rotation-item">
+          <span class="key-rotation-label">Next Rotation:</span>
+          <span id="next-rotation" class="key-rotation-value">-</span>
+        </div>
+        <div class="key-rotation-item">
+          <span class="key-rotation-label">Active Sessions:</span>
+          <span id="active-sessions" class="key-rotation-value">-</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Charts Section -->
+    <div class="dashboard-charts">
+      <div class="chart-container glass">
+        <h3 class="section-title">Security Metrics Trends</h3>
+        <div class="chart-wrapper">
+          <canvas id="metrics-chart"></canvas>
+        </div>
+      </div>
+      <div class="chart-container glass">
+        <h3 class="section-title">Blocked Attacks by Type</h3>
+        <div class="chart-wrapper">
+          <canvas id="attack-types-chart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Alert Feed -->
+    <div class="dashboard-alerts glass">
+      <h3 class="section-title">Alert Feed</h3>
+      <div id="alert-feed" class="alert-feed"></div>
+    </div>
+  </main>
+</div>
+
+<script>
+window.__BOOT_USER__ = {{ user | tojson }};
+</script>
+<script src="/static/security_dashboard.js?v=8"></script>
+</body>
+</html>

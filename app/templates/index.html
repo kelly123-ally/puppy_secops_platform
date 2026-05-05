@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PuppySecOps Platform</title>
-  <link rel="stylesheet" href="/static/styles.css?v=4" />
+  <link rel="stylesheet" href="/static/styles.css?v=9" />
 </head>
 <body>
 <div id="app-shell" class="app-shell">
@@ -21,7 +21,7 @@
       <button class="nav-item" data-tab="operations">任务与终端</button>
       <button class="nav-item" data-tab="security">安全策略</button>
       <button class="nav-item" data-tab="attacklab">攻击实验</button>
-      <button class="nav-item" data-tab="audit">审计日志</button>
+      <button class="nav-item" data-tab="monitoring">安全监控</button>
     </nav>
     <div class="sidebar-footer">
       <div class="user-badge">
@@ -58,7 +58,11 @@
         <div class="panel glass large-panel">
           <div class="panel-header">
             <div>
-              <div class="panel-title">实时任务态势图（民用安全仿真）</div>
+              <div class="panel-title">
+                <span class="map-title-icon">🗺️</span>
+                实时任务态势图（民用安全仿真）
+                <span class="live-indicator">● LIVE</span>
+              </div>
               <div class="panel-subtitle">网格地图 / 障碍 / 站点 / 机器人 / 任务目标</div>
             </div>
           </div>
@@ -151,47 +155,400 @@
     </section>
 
     <section id="tab-attacklab" class="tab-panel">
-      <div class="three-col">
-        <div class="panel glass">
-          <div class="panel-header"><div class="panel-title">攻击注入</div></div>
-          <div class="button-stack">
-            <button class="danger-btn" data-attack="unsigned_injection">未签名任务注入</button>
-            <button class="danger-btn" data-attack="replay">重放旧任务 nonce</button>
-            <button class="danger-btn" data-attack="heartbeat_spoof">伪造心跳</button>
-            <button class="danger-btn" data-attack="compromise">模拟终端失陷</button>
-          </div>
-          <div class="inline-hint">系统只做本地仿真与防御验证，不用于真实攻击。</div>
+      <div class="attack-lab-header">
+        <div class="attack-lab-title-group">
+          <h2 class="attack-lab-title">⚔️ 攻击实验室</h2>
+          <p class="attack-lab-subtitle">安全防护验证 · 攻击模拟 · 防御测试</p>
         </div>
-
-        <div class="panel glass">
-          <div class="panel-header"><div class="panel-title">攻击参数</div></div>
-          <div class="form-grid">
-            <select id="attack-site">
-              <option value="zone_a">zone_a</option>
-              <option value="zone_b" selected>zone_b</option>
-              <option value="zone_c">zone_c</option>
-              <option value="zone_d">zone_d</option>
-            </select>
-            <select id="attack-robot">
-              <option value="dog1">dog1</option>
-              <option value="dog2">dog2</option>
-              <option value="dog3">dog3</option>
-              <option value="dog4">dog4</option>
-            </select>
+        <div class="attack-stats-mini">
+          <div class="stat-mini">
+            <span class="stat-mini-label">总攻击</span>
+            <span id="total-attacks" class="stat-mini-value">0</span>
+          </div>
+          <div class="stat-mini">
+            <span class="stat-mini-label">已阻断</span>
+            <span id="blocked-attacks" class="stat-mini-value">0</span>
+          </div>
+          <div class="stat-mini">
+            <span class="stat-mini-label">成功率</span>
+            <span id="block-rate" class="stat-mini-value">0%</span>
           </div>
         </div>
+      </div>
 
+      <div class="attack-grid">
+        <!-- 基础攻击 -->
+        <div class="panel glass attack-category-panel">
+          <div class="panel-header">
+            <div class="panel-title">🎯 基础攻击</div>
+            <span class="category-badge">4种</span>
+          </div>
+          <div class="attack-button-grid">
+            <button class="attack-btn attack-btn-critical" data-attack="unsigned_injection">
+              <div class="attack-btn-icon">🚫</div>
+              <div class="attack-btn-content">
+                <div class="attack-btn-title">未签名任务注入</div>
+                <div class="attack-btn-desc">绕过签名验证</div>
+              </div>
+            </button>
+            <button class="attack-btn attack-btn-warning" data-attack="replay">
+              <div class="attack-btn-icon">🔄</div>
+              <div class="attack-btn-content">
+                <div class="attack-btn-title">重放攻击</div>
+                <div class="attack-btn-desc">重放旧任务nonce</div>
+              </div>
+            </button>
+            <button class="attack-btn attack-btn-danger" data-attack="heartbeat_spoof">
+              <div class="attack-btn-icon">💓</div>
+              <div class="attack-btn-content">
+                <div class="attack-btn-title">伪造心跳</div>
+                <div class="attack-btn-desc">模拟机器人在线</div>
+              </div>
+            </button>
+            <button class="attack-btn attack-btn-critical" data-attack="compromise">
+              <div class="attack-btn-icon">🦠</div>
+              <div class="attack-btn-content">
+                <div class="attack-btn-title">终端失陷</div>
+                <div class="attack-btn-content">模拟终端被攻破</div>
+              </div>
+            </button>
+          </div>
+        </div>
+
+        <!-- 高级攻击 -->
+        <div class="panel glass attack-category-panel">
+          <div class="panel-header">
+            <div class="panel-title">⚡ 高级攻击</div>
+            <span class="category-badge category-badge-new">新增</span>
+          </div>
+          <div class="attack-button-grid">
+            <button class="attack-btn attack-btn-critical" data-attack="mitm">
+              <div class="attack-btn-icon">🕵️</div>
+              <div class="attack-btn-content">
+                <div class="attack-btn-title">中间人攻击</div>
+                <div class="attack-btn-desc">拦截通信数据</div>
+              </div>
+            </button>
+            <button class="attack-btn attack-btn-danger" data-attack="ddos">
+              <div class="attack-btn-icon">💥</div>
+              <div class="attack-btn-content">
+                <div class="attack-btn-title">DDoS攻击</div>
+                <div class="attack-btn-desc">大量请求淹没</div>
+              </div>
+            </button>
+            <button class="attack-btn attack-btn-warning" data-attack="privilege_escalation">
+              <div class="attack-btn-icon">👑</div>
+              <div class="attack-btn-content">
+                <div class="attack-btn-title">权限提升</div>
+                <div class="attack-btn-desc">尝试获取管理员权限</div>
+              </div>
+            </button>
+            <button class="attack-btn attack-btn-critical" data-attack="cert_forge">
+              <div class="attack-btn-icon">🎭</div>
+              <div class="attack-btn-content">
+                <div class="attack-btn-title">证书伪造</div>
+                <div class="attack-btn-desc">伪造合法证书</div>
+              </div>
+            </button>
+          </div>
+        </div>
+
+        <!-- 攻击参数 -->
+        <div class="panel glass attack-params-panel">
+          <div class="panel-header">
+            <div class="panel-title">⚙️ 攻击参数</div>
+          </div>
+          <div class="attack-params-form">
+            <div class="param-group">
+              <label class="param-label">目标站点</label>
+              <select id="attack-site" class="param-select">
+                <option value="zone_a">Zone A</option>
+                <option value="zone_b" selected>Zone B</option>
+                <option value="zone_c">Zone C</option>
+                <option value="zone_d">Zone D</option>
+              </select>
+            </div>
+            <div class="param-group">
+              <label class="param-label">目标机器人</label>
+              <select id="attack-robot" class="param-select">
+                <option value="dog1">Dog 1</option>
+                <option value="dog2">Dog 2</option>
+                <option value="dog3">Dog 3</option>
+                <option value="dog4">Dog 4</option>
+              </select>
+            </div>
+            <div class="param-group">
+              <label class="param-label">攻击强度</label>
+              <select id="attack-intensity" class="param-select">
+                <option value="low">低强度</option>
+                <option value="medium" selected>中强度</option>
+                <option value="high">高强度</option>
+              </select>
+            </div>
+            <div class="param-group">
+              <label class="param-label">攻击次数</label>
+              <input type="number" id="attack-count" class="param-input" value="1" min="1" max="10" />
+            </div>
+          </div>
+          <div class="attack-actions">
+            <button id="batch-attack-btn" class="action-btn action-btn-primary">
+              <span class="btn-icon">🎯</span>
+              批量攻击测试
+            </button>
+            <button id="stop-attack-btn" class="action-btn action-btn-secondary">
+              <span class="btn-icon">⏹️</span>
+              停止攻击
+            </button>
+          </div>
+          <div class="attack-hint">
+            <span class="hint-icon">ℹ️</span>
+            <span class="hint-text">系统仅用于本地安全验证，不会对真实系统造成影响</span>
+          </div>
+        </div>
+
+        <!-- 攻击结果 -->
+        <div class="panel glass attack-results-panel">
+          <div class="panel-header">
+            <div class="panel-title">📊 攻击结果</div>
+            <button id="clear-results-btn" class="clear-btn">清空</button>
+          </div>
+          <div id="attack-log" class="attack-results-list"></div>
+        </div>
+      </div>
+
+      <!-- 攻击统计 -->
+      <div class="attack-statistics">
         <div class="panel glass">
-          <div class="panel-header"><div class="panel-title">最近攻击结果</div></div>
-          <div id="attack-log" class="list-box"></div>
+          <div class="panel-header">
+            <div class="panel-title">📈 攻击统计分析</div>
+          </div>
+          <div class="stats-grid">
+            <div class="stat-card">
+              <div class="stat-card-icon">🎯</div>
+              <div class="stat-card-content">
+                <div class="stat-card-label">攻击总数</div>
+                <div id="stat-total" class="stat-card-value">0</div>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-card-icon">✅</div>
+              <div class="stat-card-content">
+                <div class="stat-card-label">成功阻断</div>
+                <div id="stat-blocked" class="stat-card-value">0</div>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-card-icon">❌</div>
+              <div class="stat-card-content">
+                <div class="stat-card-label">攻击成功</div>
+                <div id="stat-succeeded" class="stat-card-value">0</div>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-card-icon">🛡️</div>
+              <div class="stat-card-content">
+                <div class="stat-card-label">防御效率</div>
+                <div id="stat-efficiency" class="stat-card-value">0%</div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </section>
 
-    <section id="tab-audit" class="tab-panel">
-      <div class="panel glass">
-        <div class="panel-header"><div class="panel-title">安全审计流</div></div>
-        <div id="audit-stream" class="audit-stream"></div>
+    <section id="tab-monitoring" class="tab-panel">
+      <!-- 安全监控中心 -->
+      <div class="security-monitoring-section" style="margin-top: 0; padding-top: 0; border-top: none;">
+        <div class="section-header">
+          <div class="section-title-group">
+            <h2 class="section-main-title">🛡️ 安全监控中心</h2>
+            <p class="section-subtitle">实时安全指标、威胁情报与异常检测</p>
+          </div>
+        </div>
+
+        <!-- 安全指标卡片 -->
+        <div class="security-metrics-grid">
+          <div class="security-metric-card glass">
+            <div class="metric-icon">🚫</div>
+            <div class="metric-content">
+              <div class="metric-label">阻断攻击</div>
+              <div id="sec-blocked-attacks" class="metric-value">0</div>
+              <div class="metric-trend">
+                <span class="trend-indicator trend-up">↑ 12%</span>
+                <span class="trend-label">较上小时</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="security-metric-card glass">
+            <div class="metric-icon">🤖</div>
+            <div class="metric-content">
+              <div class="metric-label">活跃机器人</div>
+              <div id="sec-active-robots" class="metric-value">0</div>
+              <div class="metric-trend">
+                <span class="trend-indicator trend-stable">→ 0%</span>
+                <span class="trend-label">较上小时</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="security-metric-card glass">
+            <div class="metric-icon">🔐</div>
+            <div class="metric-content">
+              <div class="metric-label">已吊销证书</div>
+              <div id="sec-revoked-certs" class="metric-value">0</div>
+              <div class="metric-trend">
+                <span class="trend-indicator trend-down">↓ 5%</span>
+                <span class="trend-label">较上小时</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="security-metric-card glass">
+            <div class="metric-icon">⚠️</div>
+            <div class="metric-content">
+              <div class="metric-label">异常检测</div>
+              <div id="sec-anomalies" class="metric-value">0</div>
+              <div class="metric-trend">
+                <span class="trend-indicator trend-up">↑ 8%</span>
+                <span class="trend-label">较上小时</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="security-metric-card glass">
+            <div class="metric-icon">🔄</div>
+            <div class="metric-content">
+              <div class="metric-label">密钥轮换</div>
+              <div id="sec-key-rotations" class="metric-value">0</div>
+              <div class="metric-trend">
+                <span class="trend-indicator trend-stable">→ 0%</span>
+                <span class="trend-label">较上小时</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 威胁情报与密钥状态 -->
+        <div class="security-info-grid">
+          <div class="panel glass threat-intelligence-panel">
+            <div class="panel-header">
+              <div class="panel-title">🎯 威胁情报</div>
+              <span class="status-badge status-active">实时监控</span>
+            </div>
+            <div class="threat-stats">
+              <div class="threat-stat-item">
+                <div class="threat-stat-label">高危威胁</div>
+                <div class="threat-stat-value critical">3</div>
+              </div>
+              <div class="threat-stat-item">
+                <div class="threat-stat-label">中危威胁</div>
+                <div class="threat-stat-value warning">7</div>
+              </div>
+              <div class="threat-stat-item">
+                <div class="threat-stat-label">低危威胁</div>
+                <div class="threat-stat-value info">12</div>
+              </div>
+              <div class="threat-stat-item">
+                <div class="threat-stat-label">已处理</div>
+                <div class="threat-stat-value success">156</div>
+              </div>
+            </div>
+            <div class="threat-timeline">
+              <div class="timeline-item">
+                <div class="timeline-dot critical"></div>
+                <div class="timeline-content">
+                  <div class="timeline-title">检测到重放攻击</div>
+                  <div class="timeline-time">2分钟前</div>
+                </div>
+              </div>
+              <div class="timeline-item">
+                <div class="timeline-dot warning"></div>
+                <div class="timeline-content">
+                  <div class="timeline-title">异常心跳模式</div>
+                  <div class="timeline-time">5分钟前</div>
+                </div>
+              </div>
+              <div class="timeline-item">
+                <div class="timeline-dot info"></div>
+                <div class="timeline-content">
+                  <div class="timeline-title">未签名命令被拒绝</div>
+                  <div class="timeline-time">8分钟前</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel glass key-rotation-panel">
+            <div class="panel-header">
+              <div class="panel-title">🔐 密钥轮换状态</div>
+              <span class="status-badge status-healthy">健康</span>
+            </div>
+            <div class="key-rotation-info">
+              <div class="key-info-item">
+                <div class="key-info-icon">🕐</div>
+                <div class="key-info-content">
+                  <div class="key-info-label">上次轮换</div>
+                  <div class="key-info-value" id="last-rotation-time">2小时前</div>
+                </div>
+              </div>
+              <div class="key-info-item">
+                <div class="key-info-icon">⏰</div>
+                <div class="key-info-content">
+                  <div class="key-info-label">下次轮换</div>
+                  <div class="key-info-value" id="next-rotation-time">22小时后</div>
+                </div>
+              </div>
+              <div class="key-info-item">
+                <div class="key-info-icon">👥</div>
+                <div class="key-info-content">
+                  <div class="key-info-label">活跃会话</div>
+                  <div class="key-info-value" id="active-sessions-count">4</div>
+                </div>
+              </div>
+              <div class="key-info-item">
+                <div class="key-info-icon">📊</div>
+                <div class="key-info-content">
+                  <div class="key-info-label">轮换成功率</div>
+                  <div class="key-info-value">99.8%</div>
+                </div>
+              </div>
+            </div>
+            <div class="key-rotation-progress">
+              <div class="progress-label">
+                <span>轮换周期进度</span>
+                <span>8.3%</span>
+              </div>
+              <div class="progress-bar">
+                <div class="progress-fill" style="width: 8.3%"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 实时告警流 -->
+        <div class="panel glass alerts-panel">
+          <div class="panel-header">
+            <div class="panel-title">🚨 实时告警流</div>
+            <div class="alert-filters">
+              <button class="filter-btn active" data-level="all">全部</button>
+              <button class="filter-btn" data-level="critical">严重</button>
+              <button class="filter-btn" data-level="warning">告警</button>
+              <button class="filter-btn" data-level="info">信息</button>
+            </div>
+          </div>
+          <div id="security-alert-feed" class="alert-feed">
+            <!-- 告警项将通过JavaScript动态填充 -->
+          </div>
+        </div>
+
+        <!-- 审计日志（保留在安全监控页面底部） -->
+        <div class="panel glass" style="margin-top: 24px;">
+          <div class="panel-header">
+            <div class="panel-title">📋 审计日志</div>
+          </div>
+          <div id="audit-stream" class="audit-stream"></div>
+        </div>
       </div>
     </section>
   </main>
@@ -199,6 +556,6 @@
 <script>
 window.__BOOT_USER__ = {{ user | tojson }};
 </script>
-<script src="/static/app.js?v=4"></script>
+<script src="/static/app.js?v=13"></script>
 </body>
 </html>
