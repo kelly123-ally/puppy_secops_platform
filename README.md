@@ -1,33 +1,127 @@
 # PuppySecOps Platform
 
-PuppySecOps Platform 是一套 **面向 ROS 2 / PuppyPi 多机器人系统的信息安全仿真平台**。  
-它不是军事系统，而是用于 **园区配送 / 巡检 / 灾后补给** 等民用场景的安全验证与可视化演示。
+PuppySecOps Platform 是一个面向 PuppyPi / ROS 机器人场景的信息安全演示平台。项目以“多机器人调度 + 安全协议防护 + 攻击仿真验证”为主线，用 Web 控制台展示机器人任务分配、路径规划、状态监控、攻击阻断、审计日志和安全策略变化。
 
-## 功能概览
+本项目定位为课程设计、信息安全作品赛和机器人安全实验的可视化原型。攻击功能仅用于本地仿真与授权测试，不面向真实网络攻击。
 
-- 多机器人调度与路径规划（A*）
-- 自然语言任务解析
-- 任务租约（lease_id）与幂等完成控制
-- 任务取消、重分配、离线/失陷隔离
-- 电量模拟与自动回充
-- HMAC 签名、nonce 防重放、命令验证
-- RBAC 登录（管理员 / 操作员 / 审计员）
-- 攻击回放实验台
-- 审计日志、安全策略、证书/吊销状态可视化
-- Web 控制面板（暗色风格，实时地图）
+## 项目亮点
 
-## 演示账号
+- 多机器人任务调度与实时状态展示
+- 基于网格地图的路径规划与任务执行模拟
+- 自然语言任务解析，可接入 OpenAI 兼容接口、Claude 或 DeepSeek，也可回退到规则引擎
+- RBAC 登录鉴权，区分管理员、操作员、安全审计员
+- LBSE（Lease-Bound Secure Envelope）安全封装机制
+- AES-GCM 加密认证、HKDF 派生密钥、AAD 绑定消息头
+- `task_id`、`lease_id`、`session_id`、`seq`、`timestamp` 多维绑定，防止重放和越权完成任务
+- 攻击实验台：未签名指令注入、重放攻击、心跳伪造、中间人篡改、DDoS 模拟、权限提升模拟、证书伪造模拟
+- 审计日志、安全指标、证书吊销、异常检测和告警模块
+- FastAPI + Jinja2 + WebSocket 实现前后端联动
 
-- admin / Admin123!
-- operator / Operator123!
-- auditor / Auditor123!
+## 系统架构
 
-## 运行方式
+```text
+puppy_secops_platform/
+├── app/
+│   ├── main.py                  # FastAPI 应用入口与 WebSocket 广播循环
+│   ├── routes.py                # 页面路由、API 接口、攻击实验接口
+│   ├── auth.py                  # 登录认证、Session、角色权限控制
+│   ├── core/
+│   │   ├── simulator.py         # 多机器人调度与安全仿真核心
+│   │   ├── lbse.py              # LBSE 安全封装协议
+│   │   ├── security.py          # HMAC 签名、防重放基础模块
+│   │   ├── planner.py           # 网格路径规划
+│   │   ├── models.py            # Robot、Task、PolicySet 等数据模型
+│   │   ├── nl_agent.py          # 自然语言任务解析与 AI 接口适配
+│   │   ├── access_controller.py # 访问控制
+│   │   ├── certificate_manager.py
+│   │   ├── key_manager.py
+│   │   ├── audit_logger.py
+│   │   ├── anomaly_detector.py
+│   │   └── alert_system.py
+│   ├── templates/               # HTML 页面模板
+│   └── static/                  # 前端 JS/CSS 静态资源
+├── config/
+│   └── security_config_example.yaml
+├── scripts/
+│   ├── run.sh                   # Linux/macOS 启动脚本
+│   └── populate_security_data.py
+├── .env.example                 # 环境变量模板，不包含真实密钥
+├── .gitignore
+└── README.md
+```
+
+## 快速开始
+
+### 1. 克隆项目
+
+```bash
+git clone https://github.com/kelly123-ally/puppy_secops_platform.git
+cd puppy_secops_platform
+```
+
+### 2. 创建虚拟环境
+
+Linux / macOS：
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+```
+
+Windows PowerShell：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+### 3. 安装依赖
+
+```bash
 pip install -r requirements.txt
+```
+
+如果项目目录下暂时没有 `requirements.txt`，可以先执行：
+
+```bash
+pip install fastapi uvicorn jinja2 python-multipart cryptography httpx pyyaml websockets pytest pytest-asyncio hypothesis pyotp qrcode pillow
+pip freeze > requirements.txt
+```
+
+### 4. 配置环境变量
+
+复制示例配置：
+
+```bash
+cp .env.example .env
+```
+
+Windows PowerShell：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+然后在 `.env` 中按需填写：
+
+```env
+AI_PROVIDER=openai
+AI_API_KEY=your_api_key_here
+AI_BASE_URL=https://api.openai.com/v1
+AI_MODEL=gpt-3.5-turbo
+```
+
+不配置 AI Key 也可以运行，系统会自动使用规则引擎解析任务。
+
+### 5. 启动服务
+
+```bash
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+或者使用脚本：
+
+```bash
 bash scripts/run.sh
 ```
 
@@ -37,45 +131,168 @@ bash scripts/run.sh
 http://127.0.0.1:8000
 ```
 
-## 主要目录
+## 演示账号
 
-- `app/main.py`：FastAPI 入口
-- `app/routes.py`：页面与 API 路由
-- `app/auth.py`：登录与角色鉴权
-- `app/core/simulator.py`：核心安全仿真引擎
-- `app/core/planner.py`：A* 路径规划
-- `app/core/security.py`：签名、防重放、策略引擎
-- `app/templates/index.html`：控制台
-- `app/static/app.js`：前端逻辑
-- `app/static/styles.css`：前端样式
+| 角色 | 用户名 | 密码 | 权限说明 |
+| --- | --- | --- | --- |
+| 管理员 | `admin` | `Admin123!` | 策略配置、机器人恢复、证书吊销、攻击实验 |
+| 操作员 | `operator` | `Operator123!` | 创建任务、暂停机器人、查看任务状态 |
+| 审计员 | `auditor` | `Auditor123!` | 查看审计日志和安全事件，执行部分安全验证实验 |
 
-## 安全能力
+## 功能说明
 
-### 1. 命令签名与防重放
-任务创建通过后端签名，攻击实验室可以模拟：
-- 未签名注入
-- 重放旧 nonce
-- 过期时间戳
+### 机器人调度
+
+系统内置多台 PuppyPi 机器人对象，支持任务创建、路径规划、任务分配、任务执行、完成回执、离线处理、暂停恢复和自动重分配。每个任务会绑定目标区域、优先级、货物类型和请求者信息。
+
+### 自然语言任务解析
+
+用户可以输入类似：
+
+```text
+请立即派一只机器狗给 A 区送急救药品
+```
+
+系统会解析出：
+
+```json
+{
+  "site": "zone_a",
+  "priority": 5,
+  "cargo_type": "medical"
+}
+```
+
+如果配置了 AI 接口，优先由模型解析；如果没有配置或接口失败，则自动回退到规则引擎。
+
+### LBSE 安全封装
+
+项目中的 LBSE 机制用于保护控制中心与机器人之间的关键消息，例如：
+
+- `AssignTask`：控制中心向机器人下发任务
+- `Heartbeat`：机器人向控制中心发送心跳
+- `CompleteTask`：机器人向控制中心提交任务完成回执
+
+LBSE 主要绑定字段包括：
+
+- `msg_type`
+- `sender_id`
+- `receiver_id`
+- `session_id`
+- `seq`
+- `timestamp_ms`
+- `task_id`
+- `lease_id`
+- `role`
+- `key_id`
+
+这些字段作为 AES-GCM 的 AAD 参与认证，攻击者即使截获密文，也不能在不破坏认证标签的情况下修改任务、接收者、租约或序列号。
+
+### 攻击实验台
+
+当前支持的仿真攻击包括：
+
+- 未签名任务注入
+- 重放旧任务或旧回执
 - 心跳伪造
+- 中间人任务篡改
+- DDoS 压力模拟
+- 权限提升模拟
+- 证书伪造模拟
+- 机器人失陷与吊销
 
-### 2. 多机器人一致性防护
-- 每个任务分配生成 `lease_id`
-- 完成消息只接受“当前有效租约”
-- 旧租约完成会被忽略并记录审计日志
-- 失陷或掉线触发自动回收与重分配
+所有攻击均在本地仿真对象上完成，用于验证平台的防护链路，不会对外部主机发起真实攻击。
 
-### 3. 最小权限与吊销
-- 模拟证书状态与吊销表
-- 机器人被标记为失陷后自动 revoke
-- 被 revoke 的机器人无法继续接单
+### 安全审计
 
-## 后续接 ROS 2 的位置
+平台会记录关键安全事件，例如：
 
-这套仿真平台为实机对接预留了两个位置：
+- 平台启动
+- LBSE 启用
+- 策略修改
+- 任务提交和完成
+- 攻击阻断
+- 机器人失陷
+- 证书吊销
+- 非法租约或重放序列号
 
-1. `robot.step()` / `planner.path` 位置可以替换为 Nav2 action 调用
-2. `security.py` 可以替换为真实 SROS2 / enclave / 访问控制策略
+审计信息可用于答辩时说明“攻击发生了什么、防护机制如何响应、系统最终如何恢复”。
 
-## 说明
+## API 概览
 
-这是作品赛/答辩用的**安全仿真平台**，攻击功能仅限本地仿真与防御验证，不用于真实网络入侵或破坏。
+| 接口 | 方法 | 说明 |
+| --- | --- | --- |
+| `/api/login` | POST | 用户登录 |
+| `/api/logout` | POST | 用户退出 |
+| `/api/bootstrap` | GET | 获取初始化状态 |
+| `/api/state` | GET | 获取实时状态快照 |
+| `/api/audit` | GET | 获取审计日志 |
+| `/api/tasks/natural` | POST | 提交自然语言任务 |
+| `/api/tasks/structured` | POST | 提交结构化任务 |
+| `/api/tasks/cancel` | POST | 取消任务 |
+| `/api/policies/update` | POST | 更新安全策略 |
+| `/api/robots/pause` | POST | 暂停或恢复机器人 |
+| `/api/robots/offline` | POST | 设置机器人离线状态 |
+| `/api/robots/recover` | POST | 恢复机器人 |
+| `/api/robots/revoke` | POST | 吊销机器人 |
+| `/api/attacks/unsigned_injection` | POST | 未签名任务注入实验 |
+| `/api/attacks/replay` | POST | 重放攻击实验 |
+| `/api/attacks/heartbeat_spoof` | POST | 心跳伪造实验 |
+| `/api/attacks/compromise` | POST | 机器人失陷实验 |
+| `/api/attacks/mitm` | POST | 中间人篡改实验 |
+| `/api/attacks/ddos` | POST | DDoS 模拟实验 |
+| `/api/attacks/privilege_escalation` | POST | 权限提升模拟实验 |
+| `/api/attacks/cert_forge` | POST | 证书伪造模拟实验 |
+| `/ws/stream` | WebSocket | 实时状态推送 |
+
+## 测试
+
+运行全部测试：
+
+```bash
+pytest
+```
+
+只运行核心安全模块测试：
+
+```bash
+pytest app/core
+```
+
+运行指定测试文件：
+
+```bash
+pytest app/core/test_key_manager_unit.py
+```
+
+## 上传 GitHub 前必须检查
+
+不要提交以下内容：
+
+- `.env`
+- `.venv/`
+- `__pycache__/`
+- `.pytest_cache/`
+- `.hypothesis/`
+- `*.pem`
+- `*.key`
+- `*.bin`
+- `audit_events.json`
+- `crl.json`
+- `threat_intelligence.json`
+- 测试生成的临时日志和密钥文件
+
+如果曾经把真实 API Key、私钥、证书或虚拟环境提交过，应该撤销密钥并清理 Git 历史后再公开仓库。
+
+## 后续可接入真实 PuppyPi / ROS 的位置
+
+当前项目是安全仿真平台。后续接入真实 PuppyPi 或 ROS 2 时，可以重点替换以下位置：
+
+1. `app/core/simulator.py` 中的机器人运动逻辑，替换为真实机器人状态订阅与控制指令发布。
+2. `app/core/planner.py` 中的网格路径规划，替换为 ROS 2 Nav2 action 或 PuppyPi 的运动控制接口。
+3. `app/core/lbse.py` 中的消息封装逻辑，扩展为真实控制消息的加密认证层。
+4. `app/core/access_controller.py` 与 `certificate_manager.py`，进一步对接 SROS2 enclave、证书、权限策略和 topic/service/action 访问控制。
+
+## 项目声明
+
+本项目用于机器人安全教学、作品赛演示和授权环境下的防御验证。请勿将其中的攻击仿真思路用于未授权系统。项目中的默认账号、默认密码和演示密钥不应直接用于生产环境。
