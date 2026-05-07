@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .core.qwen_client import parse_task_via_qwen
+from .core.task_guard import validate_task_candidate
+
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -77,7 +80,70 @@ async def api_audit(request: Request):
 async def api_natural_task(request: Request, payload: dict = Body(...)):
     user = require_roles(request, {"admin", "operator"})
     simulator = get_simulator(request.app)
-    return simulator.submit_nl_task(payload.get("text", ""), requested_by=user.username)
+
+    text = payload.get("text", "").strip()
+    candidate = await parse_task_via_qwen(text, requested_by=user.username)
+    guard_result = validate_task_candidate(candidate, raw_text=text, username=user.username)
+
+    print("\n[GUARD] ===== security check =====", flush=True)
+    print("[GUARD] raw_text:", repr(text), flush=True)
+    print("[GUARD] decision:", guard_result["decision"], flush=True)
+    print("[GUARD] risk_level:", guard_result["risk_level"], flush=True)
+    print("[GUARD] reasons:", guard_result["reasons"], flush=True)
+    print("[GUARD] audit_candidate:", guard_result["audit_candidate"], flush=True)
+    print("[GUARD] final_task:", guard_result["final_task"], flush=True)
+
+    simulator.log(
+        "info" if guard_result["decision"] == "allow" else "warn",
+        "guard",
+        "nl_candidate_checked",
+        {
+            "raw_text": text,
+            "decision": guard_result["decision"],
+            "risk_level": guard_result["risk_level"],
+            "reasons": guard_result["reasons"],
+            "candidate": guard_result["audit_candidate"],
+        },
+    )
+
+    if guard_result["decision"] == "block":
+        simulator.log(
+            "warn",
+            "guard",
+            "nl_task_blocked",
+            {
+                "raw_text": text,
+                "reasons": guard_result["reasons"],
+                "candidate": guard_result["audit_candidate"],
+            },
+        )
+        return {
+            "ok": False,
+            "stage": "task_guard",
+            "message": "任务被安全策略阻断",
+            "risk_level": guard_result["risk_level"],
+            "reasons": guard_result["reasons"],
+            "task_candidate": guard_result["audit_candidate"],
+        }
+
+    final_task = guard_result["final_task"]
+
+    simulator.log(
+        "info",
+        "guard",
+        "nl_task_allowed",
+        {
+            "raw_text": text,
+            "final_task": final_task,
+            "candidate": guard_result["audit_candidate"],
+        },
+    )
+
+    return simulator.submit_signed_task(
+        final_task,
+        actor=user.username,
+        source=final_task.get("source", "qwen_api"),
+    )
 
 
 @router.post("/api/tasks/structured")

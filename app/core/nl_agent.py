@@ -200,7 +200,7 @@ def init_ai_provider():
     api_key = os.getenv("AI_API_KEY", "")
     
     if not api_key:
-        print("⚠️  未配置AI_API_KEY，将使用规则引擎")
+        print("未配置AI_API_KEY，将使用规则引擎")
         return
     
     try:
@@ -208,23 +208,23 @@ def init_ai_provider():
             model = os.getenv("AI_MODEL", "gpt-3.5-turbo")
             base_url = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
             _ai_provider = OpenAIProvider(api_key, model, base_url)
-            print(f"✅ AI接口已启用: OpenAI ({model})")
+            print(f"AI接口已启用: OpenAI ({model})")
             
         elif provider_type == "claude":
             model = os.getenv("AI_MODEL", "claude-3-haiku-20240307")
             _ai_provider = ClaudeProvider(api_key, model)
-            print(f"✅ AI接口已启用: Claude ({model})")
+            print(f"AI接口已启用: Claude ({model})")
             
         elif provider_type == "deepseek":
             model = os.getenv("AI_MODEL", "deepseek-chat")
             _ai_provider = DeepSeekProvider(api_key, model)
-            print(f"✅ AI接口已启用: DeepSeek ({model})")
+            print(f"AI接口已启用: DeepSeek ({model})")
             
         else:
-            print(f"⚠️  未知的AI提供者: {provider_type}，将使用规则引擎")
+            print(f"未知的AI提供者: {provider_type}，将使用规则引擎")
             
     except Exception as e:
-        print(f"⚠️  AI接口初始化失败: {e}，将使用规则引擎")
+        print(f"AI接口初始化失败: {e}，将使用规则引擎")
 
 
 # 规则引擎（备用方案）

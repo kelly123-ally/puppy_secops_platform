@@ -204,8 +204,18 @@ async function postJSON(url, payload) {
     showNotification(`请求失败: ${text}`, 'error');
     return null;
   }
+
+  const data = await resp.json();
+  if (data && data.ok === false) {
+    const reasons = Array.isArray(data.reasons) && data.reasons.length
+      ? `：${data.reasons.join(', ')}`
+      : '';
+    showNotification(`${data.message || data.reason || '操作被拒绝'}${reasons}`, 'error');
+    return data;
+  }
+
   showNotification('操作成功', 'success');
-  return await resp.json();
+  return data;
 }
 
 // 优化4：通知系统 - 提供视觉反馈

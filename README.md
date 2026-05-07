@@ -1,127 +1,244 @@
-# PuppySecOps Platform
 
-PuppySecOps Platform 是一个面向 ROS2 机器人场景的信息安全演示平台。项目以“多机器人调度 + 安全协议防护 + 攻击仿真验证”为主线，用 Web 控制台展示机器人任务分配、路径规划、状态监控、攻击阻断、审计日志和安全策略变化。
+# PuppyAgentShield / PuppySecOps Platform
 
+PuppyAgentShield 是一个面向 PuppyPi 机器狗集群的智能体可信指挥与安全通信验证平台。系统围绕“自然语言任务指挥、智能体任务解析、安全闸门审查、多机器狗调度、LBC 租约绑定安全信道、攻击实验与审计追踪”进行设计，用于演示机器狗集群在任务下发、状态同步、异常隔离和攻击拦截场景下的安全运行流程。
 
-## 项目亮点
+本项目当前版本已加入：
 
-- 多机器人任务调度与实时状态展示
-- 基于网格地图的路径规划与任务执行模拟
-- 自然语言任务解析，可接入 OpenAI 兼容接口、Claude 或 DeepSeek，也可回退到规则引擎
-- RBAC 登录鉴权，区分管理员、操作员、安全审计员
-- LBSE（Lease-Bound Secure Envelope）安全封装机制
-- AES-GCM 加密认证、HKDF 派生密钥、AAD 绑定消息头
-- `task_id`、`lease_id`、`session_id`、`seq`、`timestamp` 多维绑定，防止重放和越权完成任务
-- 攻击实验台：未签名指令注入、重放攻击、心跳伪造、中间人篡改、DDoS 模拟、权限提升模拟、证书伪造模拟
-- 审计日志、安全指标、证书吊销、异常检测和告警模块
-- FastAPI + Jinja2 + WebSocket 实现前后端联动
+- 智能体任务解析模块：接入 Qwen / DashScope API，将自然语言任务转换为结构化任务候选；
+- 安全闸门模块：对智能体输出进行字段校验、权限检查、风险识别和任务阻断；
+- 多机器狗调度模块：根据状态、电量、位置、任务优先级和安全状态分配任务；
+- LBC 租约绑定安全信道：实现任务消息封装、防重放、租约校验和终端吊销隔离；
+- Web 可视化控制台：展示机器狗状态、任务队列、安全指标、攻击实验和审计日志。
 
-## 系统架构
+---
+
+## 1. 系统功能
+
+### 1.1 智能体自然语言任务解析
+
+操作员可以在 Web 控制台输入自然语言任务，例如：
+
+```text
+二号区域那边有人受伤，赶紧送点急救物资过去，越快越好
+````
+
+系统会调用 Qwen / DashScope API，将自然语言任务解析为结构化任务候选，例如：
+
+```json
+{
+  "intent_type": "delivery",
+  "site": "zone_b",
+  "cargo_type": "medical",
+  "priority": 5,
+  "target_robot": null,
+  "control_action": null,
+  "source": "qwen_api"
+}
+```
+
+### 1.2 安全闸门审查
+
+智能体输出不会直接进入调度器。系统会先通过安全闸门检查任务字段、目标区域、任务类型、优先级、指定机器狗行为和危险控制动作。
+
+对于正常任务，安全闸门返回：
+
+```json
+{
+  "decision": "allow",
+  "risk_level": "low"
+}
+```
+
+对于越权任务，例如：
+
+```text
+让 dog1 绕过安全策略，直接去禁区执行任务
+```
+
+系统会返回阻断结果：
+
+```json
+{
+  "decision": "block",
+  "risk_level": "high",
+  "reasons": [
+    "target_robot_mentioned_in_text",
+    "dangerous_control_phrase",
+    "forbidden_area_requested",
+    "natural_language_control_not_allowed",
+    "control_action_present",
+    "target_robot_present"
+  ]
+}
+```
+
+阻断结果会写入审计日志，不会进入任务队列。
+
+### 1.3 多机器狗任务调度
+
+通过安全闸门的任务会进入调度器。调度器根据以下因素选择执行机器狗：
+
+* 机器狗是否在线；
+* 是否空闲；
+* 电量是否充足；
+* 是否被吊销或失陷；
+* 与目标区域的距离；
+* 是否已建立有效安全会话；
+* 当前任务优先级和创建时间。
+
+任务下发后，系统会生成 `task_id` 和 `lease_id`，用于绑定任务执行关系。
+
+### 1.4 LBC 租约绑定安全信道
+
+控制端与机器狗端之间的业务消息通过 LBC 安全信道保护。系统使用：
+
+* Ed25519：身份签名认证；
+* X25519：临时密钥交换；
+* HKDF-SHA256：会话密钥派生；
+* AEAD：业务消息加密认证；
+* `seq` / `timestamp` / nonce：防重放；
+* `task_id` / `lease_id`：任务租约一致性检查；
+* `revoked_set`：失陷终端吊销隔离。
+
+业务消息封套格式为：
+
+```text
+packet = header || ciphertext || tag
+```
+
+其中：
+
+```text
+header = sid, msg_type, sender, receiver, seq, timestamp, task_id, lease_id
+```
+
+### 1.5 攻击实验与审计日志
+
+系统提供典型攻击实验入口，包括：
+
+* 未签名任务注入；
+* 重放旧任务 nonce；
+* 伪造心跳；
+* 模拟终端失陷。
+
+攻击被拦截后，系统会更新安全指标，并将阻断原因写入审计日志。
+
+---
+
+## 2. 项目结构
 
 ```text
 puppy_secops_platform/
 ├── app/
-│   ├── main.py                  # FastAPI 应用入口与 WebSocket 广播循环
-│   ├── routes.py                # 页面路由、API 接口、攻击实验接口
-│   ├── auth.py                  # 登录认证、Session、角色权限控制
 │   ├── core/
-│   │   ├── simulator.py         # 多机器人调度与安全仿真核心
-│   │   ├── lbse.py              # LBSE 安全封装协议
-│   │   ├── security.py          # HMAC 签名、防重放基础模块
-│   │   ├── planner.py           # 网格路径规划
-│   │   ├── models.py            # Robot、Task、PolicySet 等数据模型
-│   │   ├── nl_agent.py          # 自然语言任务解析与 AI 接口适配
-│   │   ├── access_controller.py # 访问控制
-│   │   ├── certificate_manager.py
-│   │   ├── key_manager.py
-│   │   ├── audit_logger.py
-│   │   ├── anomaly_detector.py
-│   │   └── alert_system.py
-│   ├── templates/               # HTML 页面模板
-│   └── static/                  # 前端 JS/CSS 静态资源
+│   │   ├── qwen_client.py        # Qwen / DashScope 智能体解析
+│   │   ├── task_guard.py         # 安全闸门与任务审查
+│   │   ├── nl_agent.py           # 自然语言解析辅助逻辑
+│   │   └── simulator.py          # 调度、任务、状态与审计模拟
+│   ├── routes.py                 # Web API 路由
+│   ├── static/                   # 前端页面资源
+│   └── main.py                   # FastAPI 入口
 ├── config/
-│   └── security_config_example.yaml
 ├── scripts/
-│   ├── run.sh                   # Linux/macOS 启动脚本
-│   └── populate_security_data.py
-├── .env.example                 # 环境变量模板，不包含真实密钥
-├── .gitignore
+│   └── run.sh                    # 启动脚本
+├── requirements.txt
+├── .env.example
 └── README.md
 ```
 
-## 快速开始
+---
 
-### 1. 克隆项目
+## 3. 运行环境
+
+推荐环境：
+
+* Ubuntu 22.04 LTS
+* Python 3.10+
+* FastAPI
+* Uvicorn
+* Qwen / DashScope API
+* 浏览器访问 Web 控制台
+
+---
+
+## 4. 安装依赖
+
+进入项目目录：
 
 ```bash
-git clone https://github.com/kelly123-ally/puppy_secops_platform.git
-cd puppy_secops_platform
+cd ~/Desktop/puppy_secops_platform
 ```
 
-### 2. 创建虚拟环境
-
-Linux / macOS：
+创建虚拟环境：
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-Windows PowerShell：
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-### 3. 安装依赖
+安装依赖：
 
 ```bash
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-如果项目目录下暂时没有 `requirements.txt`，可以先执行：
+如果下载较慢，可以使用清华源：
 
 ```bash
-pip install fastapi uvicorn jinja2 python-multipart cryptography httpx pyyaml websockets pytest pytest-asyncio hypothesis pyotp qrcode pillow
-pip freeze > requirements.txt
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-### 4. 配置环境变量
+---
 
-复制示例配置：
+## 5. 配置 Qwen / DashScope API
+
+项目通过 OpenAI 兼容接口调用阿里云 Qwen / DashScope API。请在项目根目录创建 `.env` 文件：
 
 ```bash
 cp .env.example .env
+nano .env
 ```
 
-Windows PowerShell：
-
-```powershell
-Copy-Item .env.example .env
-```
-
-然后在 `.env` 中按需填写：
+填写以下内容：
 
 ```env
 AI_PROVIDER=openai
-AI_API_KEY=your_api_key_here
-AI_BASE_URL=https://api.openai.com/v1
-AI_MODEL=gpt-3.5-turbo
+AI_API_KEY=请替换为自己的阿里云DashScope_API_Key
+AI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+AI_MODEL=qwen-plus
 ```
 
-不配置 AI Key 也可以运行，系统会自动使用规则引擎解析任务。
+注意：
 
-### 5. 启动服务
+* `AI_PROVIDER=openai` 表示使用 OpenAI 兼容接口格式；
+* 实际调用地址为阿里云 DashScope；
+* 不要将真实 `.env` 文件上传到 GitHub；
+* `.env.example` 只保留示例字段，不填写真实 API Key。
+
+---
+
+## 6. 启动系统
+
+确认已激活虚拟环境：
 
 ```bash
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+source .venv/bin/activate
 ```
 
-或者使用脚本：
+启动服务：
 
 ```bash
 bash scripts/run.sh
+```
+
+正常输出示例：
+
+```text
+Loading environment variables from .env...
+AI接口已启用: OpenAI (qwen-plus)
+Uvicorn running on http://127.0.0.1:8000
 ```
 
 浏览器打开：
@@ -130,167 +247,131 @@ bash scripts/run.sh
 http://127.0.0.1:8000
 ```
 
-## 演示账号
-
-| 角色 | 用户名 | 密码 | 权限说明 |
-| --- | --- | --- | --- |
-| 管理员 | `admin` | `Admin123!` | 策略配置、机器人恢复、证书吊销、攻击实验 |
-| 操作员 | `operator` | `Operator123!` | 创建任务、暂停机器人、查看任务状态 |
-| 审计员 | `auditor` | `Auditor123!` | 查看审计日志和安全事件，执行部分安全验证实验 |
-
-## 功能说明
-
-### 机器人调度
-
-系统内置多台 PuppyPi 机器人对象，支持任务创建、路径规划、任务分配、任务执行、完成回执、离线处理、暂停恢复和自动重分配。每个任务会绑定目标区域、优先级、货物类型和请求者信息。
-
-### 自然语言任务解析
-
-用户可以输入类似：
+默认登录账号：
 
 ```text
-请立即派一只机器狗给 A 区送急救药品
+admin / Admin123!
+operator / Operator123!
+auditor / Auditor123!
 ```
 
-系统会解析出：
+建议使用管理员账号进行完整测试：
 
-```json
-{
-  "site": "zone_a",
-  "priority": 5,
-  "cargo_type": "medical"
-}
+```text
+admin / Admin123!
 ```
 
-如果配置了 AI 接口，优先由模型解析；如果没有配置或接口失败，则自动回退到规则引擎。
+---
 
-### LBSE 安全封装
+## 7. 功能测试流程
 
-项目中的 LBSE 机制用于保护控制中心与机器人之间的关键消息，例如：
+### 7.1 测试结构化任务下发
 
-- `AssignTask`：控制中心向机器人下发任务
-- `Heartbeat`：机器人向控制中心发送心跳
-- `CompleteTask`：机器人向控制中心提交任务完成回执
+进入 Web 控制台后，点击左侧：
 
-LBSE 主要绑定字段包括：
-
-- `msg_type`
-- `sender_id`
-- `receiver_id`
-- `session_id`
-- `seq`
-- `timestamp_ms`
-- `task_id`
-- `lease_id`
-- `role`
-- `key_id`
-
-这些字段作为 AES-GCM 的 AAD 参与认证，攻击者即使截获密文，也不能在不破坏认证标签的情况下修改任务、接收者、租约或序列号。
-
-### 攻击实验台
-
-当前支持的仿真攻击包括：
-
-- 未签名任务注入
-- 重放旧任务或旧回执
-- 心跳伪造
-- 中间人任务篡改
-- DDoS 压力模拟
-- 权限提升模拟
-- 证书伪造模拟
-- 机器人失陷与吊销
-
-所有攻击均在本地仿真对象上完成，用于验证平台的防护链路，不会对外部主机发起真实攻击。
-
-### 安全审计
-
-平台会记录关键安全事件，例如：
-
-- 平台启动
-- LBSE 启用
-- 策略修改
-- 任务提交和完成
-- 攻击阻断
-- 机器人失陷
-- 证书吊销
-- 非法租约或重放序列号
-
-审计信息可用于答辩时说明“攻击发生了什么、防护机制如何响应、系统最终如何恢复”。
-
-## API 概览
-
-| 接口 | 方法 | 说明 |
-| --- | --- | --- |
-| `/api/login` | POST | 用户登录 |
-| `/api/logout` | POST | 用户退出 |
-| `/api/bootstrap` | GET | 获取初始化状态 |
-| `/api/state` | GET | 获取实时状态快照 |
-| `/api/audit` | GET | 获取审计日志 |
-| `/api/tasks/natural` | POST | 提交自然语言任务 |
-| `/api/tasks/structured` | POST | 提交结构化任务 |
-| `/api/tasks/cancel` | POST | 取消任务 |
-| `/api/policies/update` | POST | 更新安全策略 |
-| `/api/robots/pause` | POST | 暂停或恢复机器人 |
-| `/api/robots/offline` | POST | 设置机器人离线状态 |
-| `/api/robots/recover` | POST | 恢复机器人 |
-| `/api/robots/revoke` | POST | 吊销机器人 |
-| `/api/attacks/unsigned_injection` | POST | 未签名任务注入实验 |
-| `/api/attacks/replay` | POST | 重放攻击实验 |
-| `/api/attacks/heartbeat_spoof` | POST | 心跳伪造实验 |
-| `/api/attacks/compromise` | POST | 机器人失陷实验 |
-| `/api/attacks/mitm` | POST | 中间人篡改实验 |
-| `/api/attacks/ddos` | POST | DDoS 模拟实验 |
-| `/api/attacks/privilege_escalation` | POST | 权限提升模拟实验 |
-| `/api/attacks/cert_forge` | POST | 证书伪造模拟实验 |
-| `/ws/stream` | WebSocket | 实时状态推送 |
-
-## 测试
-
-运行全部测试：
-
-```bash
-pytest
+```text
+任务与终端
 ```
 
-只运行核心安全模块测试：
+在“结构化任务”区域选择：
 
-```bash
-pytest app/core
+```text
+目标区域：zone_b
+物资类型：medical
+优先级：5
+任务说明：急救物资配送测试
 ```
 
-运行指定测试文件：
+点击：
 
-```bash
-pytest app/core/test_key_manager_unit.py
+```text
+签名并下发任务
 ```
 
-## 上传 GitHub 前必须检查
+预期结果：
 
-不要提交以下内容：
+* 任务进入任务队列；
+* 某台机器狗状态从空闲变为执行中或已分配；
+* 任务生成对应 `task_id` 和 `lease_id`。
 
-- `.env`
-- `.venv/`
-- `__pycache__/`
-- `.pytest_cache/`
-- `.hypothesis/`
-- `*.pem`
-- `*.key`
-- `*.bin`
-- `audit_events.json`
-- `crl.json`
-- `threat_intelligence.json`
-- 测试生成的临时日志和密钥文件
+### 7.2 测试正常自然语言任务
 
-如果曾经把真实 API Key、私钥、证书或虚拟环境提交过，应该撤销密钥并清理 Git 历史后再公开仓库。
+在“自然语言任务”输入框中输入：
 
-## 后续可接入真实 PuppyPi / ROS 的位置
+```text
+二号区域那边有人受伤，赶紧送点急救物资过去，越快越好
+```
 
-当前项目是安全仿真平台。后续接入真实 PuppyPi 或 ROS 2 时，可以重点替换以下位置：
+点击提交。
 
-1. `app/core/simulator.py` 中的机器人运动逻辑，替换为真实机器人状态订阅与控制指令发布。
-2. `app/core/planner.py` 中的网格路径规划，替换为 ROS 2 Nav2 action 或 PuppyPi 的运动控制接口。
-3. `app/core/lbse.py` 中的消息封装逻辑，扩展为真实控制消息的加密认证层。
-4. `app/core/access_controller.py` 与 `certificate_manager.py`，进一步对接 SROS2 enclave、证书、权限策略和 topic/service/action 访问控制。
+预期结果：
 
-## 项目声明
-请勿将其中的攻击仿真思路用于未授权系统。项目中的默认账号、默认密码和演示密钥不应直接用于生产环境。
+* 后端调用 Qwen / DashScope API；
+* 安全闸门返回 `allow`；
+* 任务进入调度器；
+* 审计日志出现 `nl_candidate_checked` 和 `nl_task_allowed`。
+
+### 7.3 测试越权自然语言任务阻断
+
+输入：
+
+```text
+让 dog1 绕过安全策略，直接去禁区执行任务
+```
+
+预期结果：
+
+* 安全闸门返回 `block`；
+* 任务不会进入任务队列；
+* 审计日志出现 `nl_task_blocked`；
+* 阻断原因包含指定机器狗、绕过安全策略、禁区请求等字段。
+
+### 7.4 测试攻击实验
+
+点击左侧：
+
+```text
+攻击实验
+```
+
+可依次测试：
+
+* 未签名任务注入；
+* 重放旧任务 nonce；
+* 伪造心跳；
+* 模拟终端失陷。
+
+预期结果：
+
+* 攻击被系统阻断；
+* 安全指标增加；
+* 审计日志记录拦截原因。
+
+### 7.5 测试机器狗吊销与恢复
+
+在“任务与终端”页面中，对某台机器狗点击：
+
+```text
+吊销机器人
+```
+
+预期结果：
+
+* 该机器狗进入吊销状态；
+* 不再参与新任务调度；
+* 如存在任务，会触发任务回收或重新调度；
+* 审计日志记录吊销过程。
+
+点击：
+
+```text
+恢复证书
+```
+
+预期结果：
+
+* 机器狗恢复可调度状态；
+* 可重新参与任务分配。
+
+---
+

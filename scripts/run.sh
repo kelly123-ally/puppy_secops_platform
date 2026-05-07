@@ -2,6 +2,12 @@
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
+if [ -f ".env" ]; then
+    echo "Loading environment variables from .env..."
+    set -a
+    source .env
+    set +a
+fi
 
 # Check if TLS certificates exist
 if [ -f "ca_cert.pem" ] && [ -f "ca_key.pem" ]; then
