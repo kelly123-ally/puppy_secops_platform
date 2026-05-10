@@ -7,6 +7,15 @@ ALLOWED_INTENTS = {"delivery", "control", "unknown"}
 ALLOWED_SITES = {"zone_a", "zone_b", "zone_c", "zone_d", "dock"}
 ALLOWED_CARGO = {"medical", "food", "supply", "repair", "document", "battery"}
 
+HARD_BLOCK_REASONS = {
+    "target_robot_mentioned_in_text",
+    "dangerous_control_phrase",
+    "forbidden_area_requested",
+    "natural_language_control_not_allowed",
+    "control_action_present",
+    "target_robot_present",
+}
+
 
 def validate_task_candidate(candidate: Dict[str, Any], raw_text: str, username: str) -> Dict[str, Any]:
     reasons = []
@@ -17,6 +26,10 @@ def validate_task_candidate(candidate: Dict[str, Any], raw_text: str, username: 
     priority = candidate.get("priority")
     control_action = candidate.get("control_action")
     target_robot = candidate.get("target_robot")
+
+    confirmation_reasons = list(candidate.get("confirmation_reasons") or [])
+    if candidate.get("needs_confirmation"):
+        reasons.extend(confirmation_reasons or ["candidate_needs_confirmation"])
 
     # 原始自然语言高风险表达兜底检查：即使大模型漏抽字段，也不能放过
     # “指定具体机器狗 + 绕过安全策略 + 禁区/直接控制”等越权表达。
@@ -88,12 +101,19 @@ def validate_task_candidate(candidate: Dict[str, Any], raw_text: str, username: 
         "cargo_type": candidate.get("cargo_type"),
         "control_action": candidate.get("control_action"),
         "target_robot": candidate.get("target_robot"),
+        "needs_confirmation": candidate.get("needs_confirmation", False),
+        "confirmation_reasons": candidate.get("confirmation_reasons", []),
         "source": candidate.get("source", "qwen_api"),
     }
 
-    if reasons:
+    hard_reasons = [r for r in reasons if r in HARD_BLOCK_REASONS]
+
+    if hard_reasons:
         decision = "block"
         risk_level = "high"
+    elif reasons:
+        decision = "need_confirmation"
+        risk_level = "medium"
     else:
         decision = "allow"
         risk_level = "low"

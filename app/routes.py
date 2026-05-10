@@ -126,6 +126,26 @@ async def api_natural_task(request: Request, payload: dict = Body(...)):
             "task_candidate": guard_result["audit_candidate"],
         }
 
+    if guard_result["decision"] == "need_confirmation":
+        simulator.log(
+            "warn",
+            "guard",
+            "nl_task_need_confirmation",
+            {
+                "raw_text": text,
+                "reasons": guard_result["reasons"],
+                "candidate": guard_result["audit_candidate"],
+            },
+        )
+        return {
+            "ok": False,
+            "stage": "need_confirmation",
+            "message": "任务信息不完整或不够明确，请重新描述或改用结构化任务表单提交",
+            "risk_level": guard_result["risk_level"],
+            "reasons": guard_result["reasons"],
+            "task_candidate": guard_result["audit_candidate"],
+        }
+
     final_task = guard_result["final_task"]
 
     simulator.log(
@@ -144,7 +164,6 @@ async def api_natural_task(request: Request, payload: dict = Body(...)):
         actor=user.username,
         source=final_task.get("source", "qwen_api"),
     )
-
 
 @router.post("/api/tasks/structured")
 async def api_structured_task(request: Request, payload: dict = Body(...)):

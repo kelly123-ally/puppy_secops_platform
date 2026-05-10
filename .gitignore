@@ -78,3 +78,12 @@ test_*.html
 # 配置文件（保留示例）
 # .env 文件包含敏感信息，不应提交
 # 但保留 .env.example 作为模板
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local environment files
+.venv/
+.env

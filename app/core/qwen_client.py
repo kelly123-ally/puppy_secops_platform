@@ -15,24 +15,83 @@ ALLOWED_SITES = set(SITE_MAP.keys())
 ALLOWED_CARGO = {"medical", "food", "supply", "repair", "document", "battery"}
 ALLOWED_INTENTS = {"delivery", "control", "unknown"}
 
+SITE_ALIASES = {
+    "zone_a": "zone_a", "a区": "zone_a", "a区域": "zone_a", "一区": "zone_a", "一号区域": "zone_a", "地区1": "zone_a", "1号区域": "zone_a",
+    "zone_b": "zone_b", "b区": "zone_b", "b区域": "zone_b", "二区": "zone_b", "二号区域": "zone_b", "地区2": "zone_b", "2号区域": "zone_b",
+    "zone_c": "zone_c", "c区": "zone_c", "c区域": "zone_c", "三区": "zone_c", "三号区域": "zone_c", "地区3": "zone_c", "3号区域": "zone_c",
+    "zone_d": "zone_d", "d区": "zone_d", "d区域": "zone_d", "四区": "zone_d", "四号区域": "zone_d", "地区4": "zone_d", "4号区域": "zone_d",
+    "dock": "dock", "充电站": "dock", "回充": "dock", "基地": "dock",
+}
 
+CARGO_ALIASES = {
+    "medical": "medical", "医疗": "medical", "急救": "medical", "药": "medical", "医疗包": "medical", "急救包": "medical",
+    "food": "food", "食物": "food", "食品": "food", "餐": "food",
+    "supply": "supply", "补给": "supply", "物资": "supply", "用品": "supply",
+    "repair": "repair", "维修": "repair", "工具": "repair", "修理": "repair",
+    "document": "document", "文档": "document", "文件": "document", "资料": "document",
+    "battery": "battery", "电池": "battery", "能源": "battery",
+}
+
+
+def _explicit_site_from_text(text: str) -> str | None:
+    lowered = text.lower()
+    for token, site in SITE_ALIASES.items():
+        if token in lowered or token in text:
+            return site
+    return None
+
+
+def _explicit_cargo_from_text(text: str) -> str | None:
+    lowered = text.lower()
+    for token, cargo in CARGO_ALIASES.items():
+        if token in lowered or token in text:
+            return cargo
+    return None
+
+
+def _confirmation_reasons(candidate: Dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if candidate.get("intent_type") != "delivery":
+        return reasons
+    if not candidate.get("site"):
+        reasons.append("site_not_clear")
+    if not candidate.get("cargo_type"):
+        reasons.append("cargo_type_not_clear")
+    if candidate.get("x") is None or candidate.get("y") is None:
+        reasons.append("coordinates_not_available")
+    return reasons
+    
+    
 def _fallback_parse(text: str, requested_by: str) -> Dict[str, Any]:
-    site = infer_site(text)
-    x, y = SITE_MAP[site]
-    return {
+    # 本地规则解析只在明确识别到区域/物资时才自动放行；
+    # 否则交给安全闸门返回 need_confirmation，避免默认猜成 zone_a/supply。
+    site = _explicit_site_from_text(text)
+    cargo_type = _explicit_cargo_from_text(text)
+
+    x = None
+    y = None
+    if site in SITE_MAP:
+        x, y = SITE_MAP[site]
+
+    candidate = {
         "task_id": f"nl_{next(_counter):03d}",
         "intent_type": "delivery",
         "site": site,
         "x": x,
         "y": y,
         "priority": infer_priority(text),
-        "cargo_type": infer_cargo(text),
+        "cargo_type": cargo_type,
         "note": text.strip(),
         "requested_by": requested_by,
         "source": "fallback_rule",
         "control_action": None,
         "target_robot": None,
     }
+
+    confirmation_reasons = _confirmation_reasons(candidate)
+    candidate["needs_confirmation"] = bool(confirmation_reasons)
+    candidate["confirmation_reasons"] = confirmation_reasons
+    return candidate
 
 
 def _extract_json_text(content: str) -> str:
@@ -56,11 +115,13 @@ def _normalize_candidate(data: Dict[str, Any], text: str, requested_by: str) -> 
 
     site = data.get("site")
     if site not in ALLOWED_SITES:
-        site = infer_site(text) if intent_type == "delivery" else None
+    # 不再默认猜成 zone_a；如果文本没有明确区域，则交给 need_confirmation。
+    	site = _explicit_site_from_text(text) if intent_type == "delivery" else None
 
     cargo_type = data.get("cargo_type")
     if cargo_type not in ALLOWED_CARGO:
-        cargo_type = infer_cargo(text) if intent_type == "delivery" else None
+    # 不再默认猜成 supply；如果文本没有明确物资，则交给 need_confirmation。
+   	 cargo_type = _explicit_cargo_from_text(text) if intent_type == "delivery" else None
 
     try:
         priority = int(data.get("priority", infer_priority(text)))
@@ -82,7 +143,7 @@ def _normalize_candidate(data: Dict[str, Any], text: str, requested_by: str) -> 
     if intent_type == "delivery" and site in SITE_MAP:
         x, y = SITE_MAP[site]
 
-    return {
+    candidate = {
         "task_id": f"nl_{next(_counter):03d}",
         "intent_type": intent_type,
         "site": site,
@@ -95,8 +156,12 @@ def _normalize_candidate(data: Dict[str, Any], text: str, requested_by: str) -> 
         "source": "qwen_api",
         "control_action": control_action,
         "target_robot": target_robot,
-    }
+	}
 
+    confirmation_reasons = _confirmation_reasons(candidate)
+    candidate["needs_confirmation"] = bool(confirmation_reasons)
+    candidate["confirmation_reasons"] = confirmation_reasons
+    return candidate
 
 async def parse_task_via_qwen(text: str, requested_by: str) -> Dict[str, Any]:
     # 兼容最新版系统的 AI_* 配置，也兼容旧版 DASHSCOPE_* 配置。
