@@ -1,0 +1,225 @@
+# app/core/raw_text_shield.py
+
+import os
+import re
+from dataclasses import dataclass, asdict
+from typing import List, Dict, Any, Optional
+
+
+@dataclass
+class RawTextShieldResult:
+    decision: str          # allow / need_confirmation / block
+    risk_score: float
+    label: str             # benign / suspicious / malicious
+    reasons: List[str]
+    backend: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+class RawTextShield:
+    """
+    RawText Shield：自然语言输入前置安全检测。
+
+    作用位置：
+    用户自然语言进入 Qwen / DashScope 解析之前。
+
+    检测目标：
+    1. 提示注入
+    2. 越狱诱导
+    3. 忽略规则 / 绕过安全闸门
+    4. 关闭审计 / 隐蔽执行
+    5. 权限提升话术
+
+    注意：
+    这个模块只判断“这句话是否像在攻击智能体”；
+    不负责判断机器狗任务本身是否允许执行。
+    """
+
+    def __init__(self):
+        self.enabled = os.getenv("RAW_SHIELD_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+        self.backend = os.getenv("RAW_SHIELD_BACKEND", "heuristic").strip().lower()
+        self.model_name = os.getenv("RAW_SHIELD_MODEL", "meta-llama/Llama-Prompt-Guard-2-86M")
+        self.block_threshold = float(os.getenv("RAW_SHIELD_BLOCK_THRESHOLD", "0.80"))
+        self.confirm_threshold = float(os.getenv("RAW_SHIELD_CONFIRM_THRESHOLD", "0.45"))
+
+        self._classifier = None
+        self._model_load_error: Optional[str] = None
+
+        if self.enabled and self.backend == "prompt_guard2":
+            self._load_prompt_guard2()
+
+    def scan(self, text: str) -> RawTextShieldResult:
+        if not self.enabled:
+            return RawTextShieldResult(
+                decision="allow",
+                risk_score=0.0,
+                label="disabled",
+                reasons=[],
+                backend="disabled",
+            )
+
+        text = text or ""
+        text = text.strip()
+
+        if not text:
+            return RawTextShieldResult(
+                decision="block",
+                risk_score=1.0,
+                label="malicious",
+                reasons=["empty_input"],
+                backend=self.backend,
+            )
+
+        heuristic_score, heuristic_reasons = self._heuristic_scan(text)
+
+        if self.backend == "prompt_guard2" and self._classifier is not None:
+            model_score, model_label = self._prompt_guard2_score(text)
+            risk_score = max(model_score, heuristic_score)
+            reasons = list(dict.fromkeys(heuristic_reasons + [f"model_label_{model_label}"]))
+            backend = "prompt_guard2"
+        else:
+            risk_score = heuristic_score
+            model_label = "heuristic"
+            reasons = heuristic_reasons
+            backend = "heuristic"
+
+            if self.backend == "prompt_guard2" and self._model_load_error:
+                reasons.append("prompt_guard2_unavailable_fallback_to_heuristic")
+
+        if risk_score >= self.block_threshold:
+            decision = "block"
+            label = "malicious"
+        elif risk_score >= self.confirm_threshold or reasons:
+            decision = "need_confirmation"
+            label = "suspicious"
+        else:
+            decision = "allow"
+            label = "benign"
+
+        return RawTextShieldResult(
+            decision=decision,
+            risk_score=round(float(risk_score), 4),
+            label=label,
+            reasons=reasons,
+            backend=backend,
+        )
+
+    def _load_prompt_guard2(self) -> None:
+        try:
+            from transformers import pipeline
+
+            self._classifier = pipeline(
+                "text-classification",
+                model=self.model_name,
+                tokenizer=self.model_name,
+                top_k=None,
+                truncation=True,
+                max_length=512,
+            )
+            print(f"[RawTextShield] Prompt Guard 2 loaded: {self.model_name}")
+
+        except Exception as e:
+            self._classifier = None
+            self._model_load_error = str(e)
+            print(f"[RawTextShield] Prompt Guard 2 load failed, fallback to heuristic: {e}")
+
+    def _prompt_guard2_score(self, text: str) -> tuple[float, str]:
+        """
+        Prompt Guard 2 输出通常是 benign / malicious。
+        为了兼容 transformers 不同版本，这里对返回格式做了容错。
+        """
+        chunks = self._split_text(text, max_chars=700)
+
+        max_score = 0.0
+        max_label = "benign"
+
+        for chunk in chunks:
+            output = self._classifier(chunk)
+
+            # 兼容：
+            # [[{"label": "benign", "score": ...}, {"label": "malicious", "score": ...}]]
+            # 或 [{"label": "...", "score": ...}]
+            if isinstance(output, list) and output and isinstance(output[0], list):
+                items = output[0]
+            else:
+                items = output
+
+            score_map = {}
+            for item in items:
+                label = str(item.get("label", "")).lower()
+                score = float(item.get("score", 0.0))
+                score_map[label] = score
+
+            malicious_score = score_map.get("malicious", 0.0)
+
+            if malicious_score > max_score:
+                max_score = malicious_score
+                max_label = "malicious" if malicious_score >= 0.5 else "benign"
+
+        return max_score, max_label
+
+    def _heuristic_scan(self, text: str) -> tuple[float, List[str]]:
+        """
+        中文场景兜底检测。
+        注意：这个不是最终安全闸门，只是给 prompt attack 做前置风险信号。
+        """
+        normalized = self._normalize(text)
+        reasons: List[str] = []
+        score = 0.0
+
+        patterns = {
+            "override_rule_phrase": [
+                "忽略之前", "忽略以上", "忽略前面", "无视规则", "绕过规则",
+                "不要遵守", "不用遵守", "忘记规则", "覆盖规则",
+            ],
+            "disable_security_phrase": [
+                "关闭安全", "禁用安全", "绕过安全闸门", "关闭安全闸门",
+                "跳过安全检查", "不经过安全检查", "绕过审查",
+            ],
+            "audit_evasion_phrase": [
+                "不要记录", "别记录", "不写日志", "不要审计", "取消审计",
+                "秘密执行", "隐藏任务", "不要告诉", "别告诉管理员",
+            ],
+            "privilege_escalation_phrase": [
+                "管理员模式", "最高权限", "系统维护模式", "root权限",
+                "超级用户", "开发者模式", "强制执行",
+            ],
+            "direct_jailbreak_phrase": [
+                "你现在不是", "你不再是", "解除限制", "越狱", "jailbreak",
+                "ignore previous", "ignore all previous", "developer mode",
+            ],
+        }
+
+        weights = {
+            "override_rule_phrase": 0.45,
+            "disable_security_phrase": 0.65,
+            "audit_evasion_phrase": 0.55,
+            "privilege_escalation_phrase": 0.45,
+            "direct_jailbreak_phrase": 0.70,
+        }
+
+        for reason, words in patterns.items():
+            if any(self._normalize(w) in normalized for w in words):
+                reasons.append(reason)
+                score = max(score, weights.get(reason, 0.4))
+
+        # 多个风险信号叠加时，提高风险分数
+        if len(reasons) >= 2:
+            score = max(score, 0.82)
+
+        # 典型强攻击组合：绕过安全 + 不审计/秘密执行
+        if "disable_security_phrase" in reasons and "audit_evasion_phrase" in reasons:
+            score = max(score, 0.90)
+
+        return score, reasons
+
+    def _split_text(self, text: str, max_chars: int = 700) -> List[str]:
+        return [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
+
+    def _normalize(self, text: str) -> str:
+        text = text.lower()
+        text = re.sub(r"\s+", "", text)
+        text = text.replace("，", ",").replace("。", ".").replace("：", ":")
+        return text
