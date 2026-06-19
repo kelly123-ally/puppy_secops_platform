@@ -54,6 +54,10 @@ class Task:
     attempts: int = 0
     blocked: bool = False
     block_reason: Optional[str] = None
+    plan_id: Optional[str] = None
+    step_id: Optional[str] = None
+    plan_mode: Optional[str] = None
+    preferred_robot: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

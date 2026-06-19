@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .core.qwen_client import parse_task_via_qwen
+from .core.qwen_client import parse_task_via_qwen, parse_plan_via_qwen
 from .core.task_guard import validate_task_candidate
+from .core.plan_guard import validate_plan_ir
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -82,88 +83,121 @@ async def api_natural_task(request: Request, payload: dict = Body(...)):
     simulator = get_simulator(request.app)
 
     text = payload.get("text", "").strip()
-    candidate = await parse_task_via_qwen(text, requested_by=user.username)
-    guard_result = validate_task_candidate(candidate, raw_text=text, username=user.username)
+    plan_ir = await parse_plan_via_qwen(text, requested_by=user.username)
 
-    print("\n[GUARD] ===== security check =====", flush=True)
-    print("[GUARD] raw_text:", repr(text), flush=True)
-    print("[GUARD] decision:", guard_result["decision"], flush=True)
-    print("[GUARD] risk_level:", guard_result["risk_level"], flush=True)
-    print("[GUARD] reasons:", guard_result["reasons"], flush=True)
-    print("[GUARD] audit_candidate:", guard_result["audit_candidate"], flush=True)
-    print("[GUARD] final_task:", guard_result["final_task"], flush=True)
+    # 兼容旧单任务路径：PlanIR 判断为 single_task 时，仍走原 TaskGuard + submit_signed_task。
+    if plan_ir.get("ir_type") == "single_task":
+        candidate = plan_ir.get("single_task") or await parse_task_via_qwen(text, requested_by=user.username)
+        guard_result = validate_task_candidate(candidate, raw_text=text, username=user.username)
 
-    simulator.log(
-        "info" if guard_result["decision"] == "allow" else "warn",
-        "guard",
-        "nl_candidate_checked",
-        {
-            "raw_text": text,
-            "decision": guard_result["decision"],
-            "risk_level": guard_result["risk_level"],
-            "reasons": guard_result["reasons"],
-            "candidate": guard_result["audit_candidate"],
-        },
-    )
+        print("\n[GUARD] ===== single task security check =====", flush=True)
+        print("[GUARD] raw_text:", repr(text), flush=True)
+        print("[GUARD] decision:", guard_result["decision"], flush=True)
+        print("[GUARD] reasons:", guard_result["reasons"], flush=True)
 
-    if guard_result["decision"] == "block":
         simulator.log(
-            "warn",
+            "info" if guard_result["decision"] == "allow" else "warn",
             "guard",
-            "nl_task_blocked",
+            "nl_candidate_checked",
             {
                 "raw_text": text,
+                "decision": guard_result["decision"],
+                "risk_level": guard_result["risk_level"],
                 "reasons": guard_result["reasons"],
                 "candidate": guard_result["audit_candidate"],
             },
         )
-        return {
-            "ok": False,
-            "stage": "task_guard",
-            "message": "任务被安全策略阻断",
-            "risk_level": guard_result["risk_level"],
-            "reasons": guard_result["reasons"],
-            "task_candidate": guard_result["audit_candidate"],
-        }
 
-    if guard_result["decision"] == "need_confirmation":
-        simulator.log(
-            "warn",
-            "guard",
-            "nl_task_need_confirmation",
-            {
-                "raw_text": text,
+        if guard_result["decision"] == "block":
+            return {
+                "ok": False,
+                "stage": "task_guard",
+                "message": "任务被安全策略阻断",
+                "risk_level": guard_result["risk_level"],
                 "reasons": guard_result["reasons"],
-                "candidate": guard_result["audit_candidate"],
-            },
-        )
-        return {
-            "ok": False,
-            "stage": "need_confirmation",
-            "message": "任务信息不完整或不够明确，请重新描述或改用结构化任务表单提交",
-            "risk_level": guard_result["risk_level"],
-            "reasons": guard_result["reasons"],
-            "task_candidate": guard_result["audit_candidate"],
-        }
+                "task_candidate": guard_result["audit_candidate"],
+            }
 
-    final_task = guard_result["final_task"]
+        if guard_result["decision"] == "need_confirmation":
+            reasons = guard_result["reasons"]
+            if "unsupported_if_then_task" in reasons:
+                message = "检测到条件型任务表达。当前版本不自动创建条件分支，请根据实时状态回传确认异常后再下发具体任务。"
+            else:
+                message = "任务信息不完整或不够明确，请确认或补全目标区域、物资类型等字段后再提交。"
+            return {
+                "ok": False,
+                "stage": "need_confirmation",
+                "message": message,
+                "risk_level": guard_result["risk_level"],
+                "reasons": reasons,
+                "task_candidate": guard_result["audit_candidate"],
+                "fill_suggestion": guard_result["audit_candidate"],
+            }
+
+        final_task = guard_result["final_task"]
+        simulator.log(
+            "info",
+            "guard",
+            "nl_task_allowed",
+            {"raw_text": text, "final_task": final_task, "candidate": guard_result["audit_candidate"]},
+        )
+        return simulator.submit_signed_task(final_task, actor=user.username, source=final_task.get("source", "qwen_api"))
+
+    # 新长难句路径：先做计划级审查。安全但复杂的计划必须经确认后才会编译为子任务。
+    plan_guard = validate_plan_ir(plan_ir, raw_text=text, username=user.username)
+    print("\n[PLAN_GUARD] ===== plan security check =====", flush=True)
+    print("[PLAN_GUARD] raw_text:", repr(text), flush=True)
+    print("[PLAN_GUARD] mode:", plan_ir.get("mode"), flush=True)
+    print("[PLAN_GUARD] decision:", plan_guard["decision"], flush=True)
+    print("[PLAN_GUARD] reasons:", plan_guard["reasons"], flush=True)
 
     simulator.log(
-        "info",
-        "guard",
-        "nl_task_allowed",
+        "info" if plan_guard["decision"] == "allow" else "warn",
+        "plan_guard",
+        "plan_candidate_checked",
         {
             "raw_text": text,
-            "final_task": final_task,
-            "candidate": guard_result["audit_candidate"],
+            "plan_id": plan_ir.get("plan_id"),
+            "mode": plan_ir.get("mode"),
+            "decision": plan_guard["decision"],
+            "risk_level": plan_guard["risk_level"],
+            "reasons": plan_guard["reasons"],
+            "step_results": plan_guard["step_results"],
         },
     )
 
-    return simulator.submit_signed_task(
-        final_task,
-        actor=user.username,
-        source=final_task.get("source", "qwen_api"),
-    )
+    if plan_guard["decision"] == "block":
+        return {
+            "ok": False,
+            "stage": "plan_guard",
+            "message": "长难句计划被安全策略阻断",
+            "risk_level": plan_guard["risk_level"],
+            "reasons": plan_guard["reasons"],
+            "plan_candidate": plan_ir,
+            "step_results": plan_guard["step_results"],
+        }
+
+    if plan_guard["decision"] == "need_confirmation":
+        return simulator.store_pending_plan(plan_ir, plan_guard, actor=user.username)
+
+    # 理论上只会出现在 single 或非常简单安全计划；保留自动执行能力。
+    pending = simulator.store_pending_plan(plan_ir, plan_guard, actor=user.username)
+    return simulator.confirm_plan(pending["plan_id"], actor=user.username)
+
+
+@router.post("/api/plans/confirm")
+async def api_confirm_plan(request: Request, payload: dict = Body(...)):
+    user = require_roles(request, {"admin", "operator"})
+    simulator = get_simulator(request.app)
+    return simulator.confirm_plan(str(payload.get("plan_id", "")), actor=user.username)
+
+
+@router.post("/api/plans/cancel")
+async def api_cancel_plan(request: Request, payload: dict = Body(...)):
+    user = require_roles(request, {"admin", "operator"})
+    simulator = get_simulator(request.app)
+    return simulator.cancel_pending_plan(str(payload.get("plan_id", "")), actor=user.username)
+
 
 @router.post("/api/tasks/structured")
 async def api_structured_task(request: Request, payload: dict = Body(...)):

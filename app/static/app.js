@@ -46,6 +46,7 @@ function policyValueText(value) {
 const statusLabels = {
   idle: "空闲",
   assigned: "已分配",
+  running: "执行中",
   enroute: "执行中",
   completed: "已完成",
   queued: "排队中",
@@ -144,13 +145,228 @@ document.getElementById("nl-form").addEventListener("submit", async (e) => {
   btn.disabled = true;
   btn.textContent = '提交中...';
   
-  await postJSON("/api/tasks/natural", Object.fromEntries(fd.entries()));
-  
-  // 恢复按钮
-  btn.disabled = false;
-  btn.textContent = '提交自然语言任务';
-  e.target.reset();
+  try {
+    const result = await postJSON("/api/tasks/natural", Object.fromEntries(fd.entries()));
+
+    // 单任务需要确认：一般是字段缺失、条件型表达不自动执行、模型解析不确定等。
+    if (result && result.stage === "need_confirmation") {
+      await handleSingleTaskNeedConfirmation(result);
+      return;
+    }
+
+    // 长难句/多步骤任务：后端只保存 PlanIR，不立即执行；用户确认后才编译为子任务。
+    if (result && result.stage === "plan_need_confirmation" && result.plan_id) {
+      const preview = result.plan_preview || {};
+      const ok = await showPlanConfirmModal(preview);
+      if (ok) {
+        await postJSON("/api/plans/confirm", {plan_id: result.plan_id});
+      } else {
+        await postJSON("/api/plans/cancel", {plan_id: result.plan_id});
+      }
+    }
+  } finally {
+    // 恢复按钮
+    btn.disabled = false;
+    btn.textContent = '提交自然语言任务';
+    e.target.reset();
+  }
 });
+
+function reasonLabel(reason) {
+  const labels = {
+    site_not_clear: "目标区域不明确",
+    cargo_type_not_clear: "物资类型不明确",
+    coordinates_not_available: "目标坐标不可用",
+    unsupported_if_then_task: "条件型表达不自动执行",
+    natural_language_ambiguous: "自然语言存在歧义",
+    plan_step_needs_confirmation: "子任务需要确认",
+  };
+  return labels[reason] || reason;
+}
+
+function fillStructuredTaskForm(candidate) {
+  const form = document.getElementById("task-form");
+  if (!form || !candidate) return;
+  if (candidate.site && form.elements.site) form.elements.site.value = candidate.site;
+  if (candidate.cargo_type && form.elements.cargo_type) form.elements.cargo_type.value = candidate.cargo_type;
+  if (candidate.priority && form.elements.priority) form.elements.priority.value = String(candidate.priority);
+  if (form.elements.note) form.elements.note.value = candidate.note || "";
+}
+
+async function handleSingleTaskNeedConfirmation(result) {
+  const reasons = Array.isArray(result.reasons) ? result.reasons : [];
+  const candidate = result.fill_suggestion || result.task_candidate || {};
+  const reasonText = reasons.length ? reasons.map(reasonLabel).join("、") : "解析结果需要确认";
+
+  if (reasons.includes("unsupported_if_then_task")) {
+    await showInfoModal({
+      title: "条件型任务提示",
+      subtitle: "当前版本不自动执行 if-then 条件分支",
+      message:
+        `${result.message || "检测到条件型任务表达"}\n\n` +
+        `原因：${reasonText}\n\n` +
+        "系统会持续返回机器狗状态。如果控制台收到异常事件，请由操作员根据状态回传结果再次下发具体任务。",
+      okText: "知道了",
+      tone: "warning"
+    });
+    return;
+  }
+
+  const ok = await showConfirmModal({
+    title: "任务信息不完整",
+    subtitle: "请确认或补全字段后再提交",
+    message:
+      `${result.message || "任务需要人工确认"}\n\n` +
+      `原因：${reasonText}\n\n` +
+      "是否将已识别字段填入右侧结构化任务表单，由你补全后再提交？",
+    okText: "填入表单",
+    cancelText: "取消",
+    tone: "warning"
+  });
+
+  if (ok) {
+    fillStructuredTaskForm(candidate);
+  }
+}
+
+
+function showPlanConfirmModal(preview = {}) {
+  const steps = Array.isArray(preview.steps) ? preview.steps : [];
+  const mode = preview.mode || "plan";
+  const modeLabel = mode === "parallel" ? "并行" : mode === "sequential" ? "顺序" : "多步骤";
+  const stepLines = steps.length
+    ? steps.map(s => {
+        const stepId = s.step_id || "step";
+        const site = s.site || "未知区域";
+        const cargo = s.cargo_type || "未知物资";
+        const note = s.note || "";
+        return `${stepId}：${site} / ${cargo}${note ? ` / ${note}` : ""}`;
+      }).join("\n")
+    : "未返回具体步骤";
+
+  const extra = mode === "parallel"
+    ? "两个步骤无依赖关系，确认后会批量进入调度队列；如果存在两条空闲机器狗，将分别分配并行执行。"
+    : mode === "sequential"
+      ? "后一步会等待前一步完成后再启动；每一步都会单独生成新的 task_id 和 lease_id。"
+      : "确认后，系统会按照计划步骤逐项编译为受控任务。";
+
+  return showConfirmModal({
+    title: "复杂任务确认",
+    subtitle: `系统解析到${modeLabel}计划，请确认后执行`,
+    message:
+      `系统理解为：\n${stepLines}\n\n` +
+      "确认后，每个步骤会单独生成 task_id 和 lease_id。\n\n" +
+      extra,
+    tags: [`mode = ${mode}`, "requires_confirmation", `${steps.length || 0} steps`],
+    okText: "确认执行",
+    cancelText: "取消",
+    tone: "info"
+  });
+}
+
+function showConfirmModal({
+  title = "任务确认",
+  subtitle = "请确认系统解析结果",
+  message = "",
+  okText = "确认",
+  cancelText = "取消",
+  tone = "info",
+  tags = []
+} = {}) {
+  return new Promise((resolve) => {
+    const old = document.getElementById("custom-confirm-modal");
+    if (old) old.remove();
+
+    const modal = document.createElement("div");
+    modal.id = "custom-confirm-modal";
+    modal.className = "custom-modal-mask";
+
+    const icon = tone === "warning" ? "!" : tone === "danger" ? "×" : "✓";
+    const tagHtml = Array.isArray(tags) && tags.length
+      ? `<div class="custom-modal-tags">${tags.map(t => `<span class="custom-modal-tag">${escapeHtml(t)}</span>`).join("")}</div>`
+      : "";
+    const cancelHtml = cancelText
+      ? `<button class="custom-modal-btn custom-modal-cancel" type="button">${escapeHtml(cancelText)}</button>`
+      : "";
+
+    modal.innerHTML = `
+      <div class="custom-modal-card custom-modal-${escapeHtml(tone)}">
+        <div class="custom-modal-head">
+          <div class="custom-modal-icon">${escapeHtml(icon)}</div>
+          <div>
+            <div class="custom-modal-title">${escapeHtml(title)}</div>
+            <div class="custom-modal-subtitle">${escapeHtml(subtitle)}</div>
+          </div>
+        </div>
+        <div class="custom-modal-body">
+          <div class="custom-modal-message">${formatModalMessage(message)}${tagHtml}</div>
+        </div>
+        <div class="custom-modal-actions">
+          ${cancelHtml}
+          <button class="custom-modal-btn custom-modal-ok" type="button">${escapeHtml(okText)}</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    let closed = false;
+    const close = (value) => {
+      if (closed) return;
+      closed = true;
+      document.removeEventListener("keydown", escHandler);
+      modal.remove();
+      resolve(value);
+    };
+
+    const escHandler = (e) => {
+      if (e.key === "Escape") close(false);
+    };
+
+    const cancelBtn = modal.querySelector(".custom-modal-cancel");
+    const okBtn = modal.querySelector(".custom-modal-ok");
+
+    if (cancelBtn) cancelBtn.onclick = () => close(false);
+    okBtn.onclick = () => close(true);
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) close(false);
+    });
+    document.addEventListener("keydown", escHandler);
+    okBtn.focus();
+  });
+}
+
+function showInfoModal({
+  title = "提示",
+  subtitle = "请查看系统提示",
+  message = "",
+  okText = "知道了",
+  tone = "info",
+  tags = []
+} = {}) {
+  return showConfirmModal({
+    title,
+    subtitle,
+    message,
+    okText,
+    cancelText: "",
+    tone,
+    tags
+  });
+}
+
+function escapeHtml(text) {
+  return String(text ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function formatModalMessage(message) {
+  return escapeHtml(message).replace(/\n/g, "<br>");
+}
 
 // 优化：文本域自动调整高度
 document.querySelectorAll('textarea').forEach(textarea => {
@@ -210,7 +426,8 @@ async function postJSON(url, payload) {
     const reasons = Array.isArray(data.reasons) && data.reasons.length
       ? `：${data.reasons.join(', ')}`
       : '';
-    showNotification(`${data.message || data.reason || '操作被拒绝'}${reasons}`, 'error');
+    const type = ['plan_need_confirmation', 'need_confirmation'].includes(data.stage) ? 'info' : 'error';
+    showNotification(`${data.message || data.reason || '操作被拒绝'}${reasons}`, type);
     return data;
   }
 
@@ -386,7 +603,7 @@ function renderMetrics(snapshot) {
   const tasks = snapshot.tasks || [];
   const metrics = snapshot.security_metrics || {};
   const online = robots.filter(r => !r.offline && !r.revoked).length;
-  const running = tasks.filter(t => t.status === "assigned").length;
+  const running = tasks.filter(t => ["assigned", "running"].includes(t.status)).length;
   const blocked = (metrics.blocked_injections || 0) + (metrics.blocked_replays || 0) + (metrics.blocked_spoofs || 0);
   const revoked = (snapshot.revoked_certificates || []).length;
   
@@ -536,7 +753,7 @@ function renderTasks(snapshot) {
   
   // 生成数据指纹
   const tasksKey = tasks.map(t => 
-    `${t.task_id}-${t.status}-${t.assigned_robot || ''}-${t.site}-${t.priority}`
+    `${t.task_id}-${t.status}-${t.assigned_robot || ''}-${t.lease_id || ''}-${t.site}-${t.priority}`
   ).join('|');
   
   // 如果数据没变，跳过重绘
@@ -1558,3 +1775,4 @@ function roundRect(ctx, x, y, w, h, r, fill, stroke) {
   if (fill) ctx.fill();
   if (stroke) ctx.stroke();
 }
+

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import time
 from collections import deque
@@ -41,6 +43,11 @@ class FleetSimulator:
         self.policies = PolicySet()
         self.robots: Dict[str, Robot] = self._build_robots()
         self.tasks: Dict[str, Task] = {}
+        # PlanIR support: a long natural-language command becomes one plan,
+        # then each executable step is compiled into a normal Task with its own lease.
+        self.plans: Dict[str, Dict[str, Any]] = {}
+        self.pending_plan_confirmations: Dict[str, Dict[str, Any]] = {}
+        self.task_plan_index: Dict[str, Dict[str, str]] = {}
 
         self.audit_log: Deque[AuditEvent] = deque(maxlen=320)
         self.attack_log: Deque[Dict[str, Any]] = deque(maxlen=80)
@@ -279,6 +286,8 @@ class FleetSimulator:
                 },
                 "robots": [r.to_dict() for r in self.robots.values()],
                 "tasks": [t.to_dict() for t in sorted(self.tasks.values(), key=lambda t: (-t.priority, t.created_at))],
+                "plans": [p for p in sorted(self.plans.values(), key=lambda p: p.get("created_at", 0), reverse=True)],
+                "pending_plans": [p for p in sorted(self.pending_plan_confirmations.values(), key=lambda p: p.get("created_at", 0), reverse=True)],
                 "policies": self.policies.to_dict(),
                 "security_metrics": dict(self.security_metrics),
                 "revoked_certificates": sorted(self.revoked_certificates),
@@ -298,7 +307,7 @@ class FleetSimulator:
         task = parse_natural_task(text, requested_by=requested_by)
         return self.submit_signed_task(task, actor=requested_by)
 
-    def submit_signed_task(self, task_data: Dict[str, Any], actor: str, source: str = "ui") -> Dict[str, Any]:
+    def submit_signed_task(self, task_data: Dict[str, Any], actor: str, source: str = "ui", auto_assign: bool = True) -> Dict[str, Any]:
         with self.lock:
             packet = self.lbse.seal(
                 msg_type="SubmitTask",
@@ -310,9 +319,9 @@ class FleetSimulator:
                 lease_id=None,
                 payload=task_data,
             )
-            return self._control_receive_submit(packet, actor=actor, source=source)
+            return self._control_receive_submit(packet, actor=actor, source=source, auto_assign=auto_assign)
 
-    def _control_receive_submit(self, packet: Dict[str, Any], actor: str, source: str) -> Dict[str, Any]:
+    def _control_receive_submit(self, packet: Dict[str, Any], actor: str, source: str, auto_assign: bool = True) -> Dict[str, Any]:
         try:
             _, payload = self.lbse.open_and_verify(
                 packet,
@@ -340,6 +349,10 @@ class FleetSimulator:
             note=payload.get("note", ""),
             requested_by=actor,
             source=source,
+            plan_id=payload.get("plan_id"),
+            step_id=payload.get("step_id"),
+            plan_mode=payload.get("plan_mode"),
+            preferred_robot=payload.get("preferred_robot"),
             created_at=time.time(),
             updated_at=time.time(),
         )
@@ -350,8 +363,14 @@ class FleetSimulator:
             "priority": task.priority,
             "cargo_type": task.cargo_type,
             "source": source,
+            "plan_id": task.plan_id,
+            "step_id": task.step_id,
         })
-        self._assign_waiting_tasks()
+        # 普通单任务提交时立即尝试调度；PlanIR 批量激活多个 ready step 时，
+        # 会先把所有 step 编译成 queued task，再统一调用一次 _assign_waiting_tasks()。
+        # 这样并行计划不会表现成“提交 s1→调度 s1→再提交 s2”的串行激活。
+        if auto_assign:
+            self._assign_waiting_tasks()
         return {"ok": True, "task_id": task.task_id}
 
     # -----------------------------
@@ -377,6 +396,9 @@ class FleetSimulator:
                 if not path:
                     continue
                 score = len(path) + max(0, 20 - int(robot.battery / 5))
+                # Sequential plans may prefer the robot that completed the previous step.
+                if task.preferred_robot and robot.robot_id != task.preferred_robot:
+                    score += 1000
                 candidates.append((score, robot.robot_id, path))
 
             if not candidates:
@@ -407,6 +429,9 @@ class FleetSimulator:
                 "priority": task.priority,
                 "cargo_type": task.cargo_type,
                 "note": task.note,
+                "plan_id": task.plan_id,
+                "step_id": task.step_id,
+                "plan_mode": task.plan_mode,
             }
             packet = self.lbse.seal(
                 msg_type="AssignTask",
@@ -422,6 +447,8 @@ class FleetSimulator:
                 "task_id": task.task_id,
                 "robot_id": robot_id,
                 "lease_id": lease_id,
+                "plan_id": task.plan_id,
+                "step_id": task.step_id,
             })
             self._robot_receive_assign(packet, proposed_path=path)
 
@@ -462,6 +489,15 @@ class FleetSimulator:
         robot.current_lease_id = lease_id
         robot.path = list(proposed_path)
         robot.assigned_site = payload["site"]
+
+        # 前端“任务总体态势/任务队列”看的是 Task.status。
+        # 旧版本只把 Robot.status 改成 enroute，但 Task.status 仍停留在 assigned，
+        # 并行计划在 UI 上容易被误看成“第一个任务完成后第二个才开始”。
+        # 机器人确认接收任务后，将对应 Task 显式标记为 running。
+        task = self.tasks.get(task_id)
+        if task:
+            task.status = "running"
+            task.updated_at = time.time()
         
         # Track task start time for completion time metrics (Task 21.4)
         self.robot_task_start_times[task_id] = time.time()
@@ -642,6 +678,239 @@ class FleetSimulator:
             "lease_id": lease_id,
             "battery": payload["battery"],
         })
+        self._notify_plan_task_completed(task_id=task_id, robot_id=robot_id, lease_id=lease_id)
+
+    # -----------------------------
+    # PlanIR 长难句计划编排
+    # -----------------------------
+    def _hash_plan(self, plan_ir: Dict[str, Any]) -> str:
+        material = {
+            "raw_text": plan_ir.get("raw_text"),
+            "mode": plan_ir.get("mode"),
+            "steps": plan_ir.get("steps", []),
+        }
+        return hashlib.sha256(json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+    def store_pending_plan(self, plan_ir: Dict[str, Any], guard_result: Dict[str, Any], actor: str) -> Dict[str, Any]:
+        """Store a safe-but-complex plan and wait for human confirmation."""
+        with self.lock:
+            plan_id = plan_ir.get("plan_id") or f"plan_{int(time.time() * 1000) % 100000}"
+            plan_ir["plan_id"] = plan_id
+            plan_ir["status"] = "pending_confirmation"
+            plan_ir["plan_hash"] = self._hash_plan(plan_ir)
+            plan_ir["created_at"] = time.time()
+            plan_ir["requested_by"] = actor
+            plan_ir["guard"] = guard_result
+            self.pending_plan_confirmations[plan_id] = plan_ir
+            self.log("warn", "plan", "plan_need_confirmation", {
+                "plan_id": plan_id,
+                "mode": plan_ir.get("mode"),
+                "step_count": len(plan_ir.get("steps", [])),
+                "reasons": guard_result.get("reasons", []),
+                "plan_hash": plan_ir["plan_hash"],
+                "actor": actor,
+            })
+            return {
+                "ok": False,
+                "stage": "plan_need_confirmation",
+                "message": "检测到多步骤/长难句任务，需要确认系统解析出的计划后再执行",
+                "plan_id": plan_id,
+                "plan_hash": plan_ir["plan_hash"],
+                "mode": plan_ir.get("mode"),
+                "reasons": guard_result.get("reasons", []),
+                "plan_preview": self._plan_preview(plan_ir),
+                "confirm_endpoint": "/api/plans/confirm",
+            }
+
+    def _plan_preview(self, plan_ir: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "plan_id": plan_ir.get("plan_id"),
+            "mode": plan_ir.get("mode"),
+            "raw_text": plan_ir.get("raw_text"),
+            "steps": [
+                {
+                    "step_id": s.get("step_id"),
+                    "site": s.get("site"),
+                    "cargo_type": s.get("cargo_type"),
+                    "priority": s.get("priority"),
+                    "depends_on": s.get("depends_on", []),
+                    "assignee": s.get("assignee"),
+                    "note": s.get("note"),
+                }
+                for s in plan_ir.get("steps", [])
+            ],
+        }
+
+    def confirm_plan(self, plan_id: str, actor: str) -> Dict[str, Any]:
+        """Confirm a pending PlanIR and activate ready steps.
+
+        Important: confirming a Plan does not create one big lease. Each activated step is
+        compiled into a normal Task and obtains its own lease during dispatch.
+        """
+        with self.lock:
+            plan = self.pending_plan_confirmations.pop(plan_id, None)
+            if not plan:
+                plan = self.plans.get(plan_id)
+            if not plan:
+                return {"ok": False, "reason": "plan_not_found"}
+            if plan.get("status") not in {"pending_confirmation", "approved", "running"}:
+                return {"ok": False, "reason": f"plan_status_{plan.get('status')}"}
+
+            plan["status"] = "approved"
+            plan["confirmed_at"] = time.time()
+            plan["confirmed_by"] = actor
+            for step in plan.get("steps", []):
+                step.setdefault("status", "pending")
+                step.setdefault("task_id", None)
+                step.setdefault("assigned_robot", None)
+                step.setdefault("lease_id", None)
+            self.plans[plan_id] = plan
+            self.log("info", "plan", "plan_confirmed", {
+                "plan_id": plan_id,
+                "mode": plan.get("mode"),
+                "actor": actor,
+                "plan_hash": plan.get("plan_hash"),
+            })
+            self._start_ready_plan_steps(plan_id)
+            return {
+                "ok": True,
+                "plan_id": plan_id,
+                "status": self.plans[plan_id].get("status"),
+                "started_tasks": [s.get("task_id") for s in self.plans[plan_id].get("steps", []) if s.get("task_id")],
+                "message": "计划已确认，系统将按依赖关系逐步激活子任务",
+            }
+
+    def cancel_pending_plan(self, plan_id: str, actor: str) -> Dict[str, Any]:
+        with self.lock:
+            plan = self.pending_plan_confirmations.pop(plan_id, None)
+            if not plan:
+                return {"ok": False, "reason": "plan_not_found"}
+            plan["status"] = "canceled"
+            self.plans[plan_id] = plan
+            self.log("warn", "plan", "plan_confirmation_canceled", {"plan_id": plan_id, "actor": actor})
+            return {"ok": True, "plan_id": plan_id, "status": "canceled"}
+
+    def _dependencies_done(self, plan: Dict[str, Any], step: Dict[str, Any]) -> bool:
+        steps = {s.get("step_id"): s for s in plan.get("steps", [])}
+        for dep in step.get("depends_on", []) or []:
+            if steps.get(dep, {}).get("status") != "completed":
+                return False
+        return True
+
+    def _start_ready_plan_steps(self, plan_id: str) -> None:
+        plan = self.plans.get(plan_id)
+        if not plan:
+            return
+
+        ready_steps = []
+        for step in plan.get("steps", []):
+            if step.get("status") != "pending":
+                continue
+            if not self._dependencies_done(plan, step):
+                continue
+            ready_steps.append(step)
+
+        # 并行计划的关键：先把同一批 ready step 全部编译成 queued task，
+        # 再统一调度一次。否则每编译一个 step 都立刻调度，前端日志会明显显示
+        # “s1 先执行、s2 后执行”，容易被误解为顺序计划。
+        started = []
+        for step in ready_steps:
+            task_id = self._compile_and_submit_plan_step(plan, step, auto_assign=False)
+            if task_id:
+                started.append(task_id)
+
+        if started:
+            self._assign_waiting_tasks()
+
+            # 调度完成后回填每个 step 的机器人和租约。
+            for step in ready_steps:
+                task_id = step.get("task_id")
+                task = self.tasks.get(task_id) if task_id else None
+                if task:
+                    step["status"] = "running" if task.status in {"assigned", "queued"} else task.status
+                    step["assigned_robot"] = task.assigned_robot
+                    step["lease_id"] = task.lease_id
+
+            plan["status"] = "running"
+            self.log("info", "plan", "plan_steps_activated", {"plan_id": plan_id, "task_ids": started})
+        self._refresh_plan_status(plan)
+
+    def _compile_and_submit_plan_step(self, plan: Dict[str, Any], step: Dict[str, Any], auto_assign: bool = True) -> Optional[str]:
+        plan_id = plan["plan_id"]
+        step_id = step["step_id"]
+        task_id = step.get("task_id") or f"{plan_id}_{step_id}"
+        if task_id in self.tasks and self.tasks[task_id].status not in {"completed", "failed", "canceled"}:
+            return task_id
+
+        preferred_robot = None
+        assignee = step.get("assignee") or {"type": "auto"}
+        if assignee.get("type") == "same_as":
+            same_step_id = assignee.get("same_as_step")
+            for prev in plan.get("steps", []):
+                if prev.get("step_id") == same_step_id:
+                    preferred_robot = prev.get("assigned_robot")
+                    break
+
+        task_data = {
+            "task_id": task_id,
+            "site": step["site"],
+            "x": step["x"],
+            "y": step["y"],
+            "priority": step.get("priority", 3),
+            "cargo_type": step.get("cargo_type", "supply"),
+            "note": f"[Plan {plan_id}/{step_id}] {step.get('note', plan.get('raw_text', ''))}",
+            "requested_by": plan.get("requested_by", "operator"),
+            "source": "plan_ir",
+            "plan_id": plan_id,
+            "step_id": step_id,
+            "plan_mode": plan.get("mode"),
+            "preferred_robot": preferred_robot,
+        }
+        step["task_id"] = task_id
+        step["status"] = "queued"
+        result = self.submit_signed_task(task_data, actor=plan.get("requested_by", "operator"), source="plan_ir", auto_assign=auto_assign)
+        if result.get("ok"):
+            self.task_plan_index[task_id] = {"plan_id": plan_id, "step_id": step_id}
+            task = self.tasks.get(task_id)
+            if task:
+                step["status"] = "running" if task.status in {"assigned", "queued"} else task.status
+                step["assigned_robot"] = task.assigned_robot
+                step["lease_id"] = task.lease_id
+            return task_id
+        step["status"] = "failed"
+        step["failure_reason"] = result.get("reason", "submit_failed")
+        self.log("warn", "plan", "plan_step_submit_failed", {"plan_id": plan_id, "step_id": step_id, "reason": step["failure_reason"]})
+        return None
+
+    def _notify_plan_task_completed(self, task_id: str, robot_id: str, lease_id: str) -> None:
+        ref = self.task_plan_index.get(task_id)
+        if not ref:
+            return
+        plan = self.plans.get(ref["plan_id"])
+        if not plan:
+            return
+        for step in plan.get("steps", []):
+            if step.get("step_id") == ref["step_id"]:
+                step["status"] = "completed"
+                step["assigned_robot"] = robot_id
+                step["lease_id"] = lease_id
+                break
+        self.log("info", "plan", "plan_step_completed", {
+            "plan_id": ref["plan_id"],
+            "step_id": ref["step_id"],
+            "task_id": task_id,
+            "robot_id": robot_id,
+            "lease_id": lease_id,
+        })
+        self._start_ready_plan_steps(ref["plan_id"])
+
+    def _refresh_plan_status(self, plan: Dict[str, Any]) -> None:
+        statuses = [s.get("status") for s in plan.get("steps", [])]
+        if statuses and all(status == "completed" for status in statuses):
+            plan["status"] = "completed"
+            self.log("info", "plan", "plan_completed", {"plan_id": plan.get("plan_id"), "mode": plan.get("mode")})
+        elif any(status in {"running", "queued"} for status in statuses):
+            plan["status"] = "running"
 
     # -----------------------------
     # 任务回收 / 吊销 / 失陷
