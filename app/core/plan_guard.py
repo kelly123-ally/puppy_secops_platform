@@ -3,14 +3,12 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from .task_guard import validate_task_candidate
-
-HARD_PLAN_BLOCK_REASONS = {
-    "too_many_steps",
-    "plan_contains_control_step",
-    "plan_contains_forbidden_or_dangerous_step",
-    "plan_has_cycle_dependency",
-    "plan_step_invalid",
-}
+from .taskguard_taxonomy import (
+    normalize_taskguard_tags,
+    taskguard_decision_from_tags,
+    taskguard_risk_level,
+    taskguard_risk_score,
+)
 
 ALLOWED_MODES = {"single", "parallel", "sequential"}
 
@@ -36,16 +34,15 @@ def _has_cycle(steps: List[Dict[str, Any]]) -> bool:
     return any(dfs(node) for node in graph)
 
 
+def _dedup(items: List[str]) -> List[str]:
+    return list(dict.fromkeys(items))
+
+
 def validate_plan_ir(plan: Dict[str, Any], raw_text: str, username: str) -> Dict[str, Any]:
-    """计划级安全审查。
+    """统一的长难句/多步任务安全审查。
 
-    当前版本只支持三类自然语言任务：
-    - single：单任务
-    - parallel：并行多任务
-    - sequential：顺序多步骤任务
-
-    “如果/若/一旦/当……则/就……”等条件型表达不会进入 PlanIR 自动执行链路，
-    而是在 qwen_client 中降级为 need_confirmation，由操作员根据实时状态回传重新下发任务。
+    计划任务不再细分 parallel/sequential/multi_robot 等训练标签；计划本身统一打
+    complex_task。每个子任务继续复用普通 TaskGuard-S 的 6 类语义风险标签。
     """
 
     reasons: List[str] = []
@@ -70,9 +67,9 @@ def validate_plan_ir(plan: Dict[str, Any], raw_text: str, username: str) -> Dict
     if _has_cycle(steps):
         reasons.append("plan_has_cycle_dependency")
 
-    # 复杂但安全的计划默认需要人工确认，确认后每个 step 单独生成 task_id/lease_id。
+    # 复杂/长难句任务统一只用 complex_task，后续训练更稳定。
     if mode in {"parallel", "sequential"} or len(steps) > 1:
-        reasons.append(f"{mode}_plan_requires_confirmation")
+        reasons.append("complex_task")
 
     valid_step_ids = set(step_ids)
     for step in steps:
@@ -81,6 +78,7 @@ def validate_plan_ir(plan: Dict[str, Any], raw_text: str, username: str) -> Dict
             if dep not in valid_step_ids:
                 reasons.append("unknown_dependency")
 
+        assignee = step.get("assignee") or {}
         candidate = {
             "task_id": step.get("task_id") or f"candidate_{sid}",
             "intent_type": step.get("intent_type") or step.get("intent") or "unknown",
@@ -93,38 +91,46 @@ def validate_plan_ir(plan: Dict[str, Any], raw_text: str, username: str) -> Dict
             "requested_by": username,
             "source": plan.get("source", "plan_ir"),
             "control_action": step.get("control_action"),
-            "target_robot": (step.get("assignee") or {}).get("robot_id") if (step.get("assignee") or {}).get("type") == "explicit" else None,
+            "target_robot": assignee.get("robot_id") if assignee.get("type") == "explicit" else None,
             "needs_confirmation": bool(step.get("confirmation_reasons")),
             "confirmation_reasons": list(step.get("confirmation_reasons") or []),
         }
-        result = validate_task_candidate(candidate, raw_text=raw_text, username=username)
-        step_results.append({
-            "step_id": sid,
-            "decision": result["decision"],
-            "risk_level": result["risk_level"],
-            "reasons": result["reasons"],
-            "final_task": result["final_task"],
-            "audit_candidate": result["audit_candidate"],
-        })
+        result = validate_task_candidate(candidate, raw_text=step.get("note") or raw_text, username=username)
+
+        step_results.append(
+            {
+                "stage": "TaskGuard",
+                "guard_engine": "TaskGuard-S",
+                "step_id": sid,
+                "decision": result["decision"],
+                "risk_level": result["risk_level"],
+                "risk_score": result.get("risk_score", 0.0),
+                "risk_tags": result.get("risk_tags", []),
+                "reasons": result["reasons"],
+                "final_task": result["final_task"],
+                "audit_candidate": result["audit_candidate"],
+            }
+        )
+
+        # 子任务风险直接并入整体计划风险标签。
         if result["decision"] == "block":
             reasons.append("plan_contains_forbidden_or_dangerous_step")
+            reasons.extend(result.get("reasons", []))
         elif result["decision"] == "need_confirmation":
             reasons.append("plan_step_needs_confirmation")
+            reasons.extend(result.get("reasons", []))
 
-    hard_reasons = [r for r in reasons if r in HARD_PLAN_BLOCK_REASONS]
-    if hard_reasons:
-        decision = "block"
-        risk_level = "high"
-    elif reasons:
-        decision = "need_confirmation"
-        risk_level = "medium"
-    else:
-        decision = "allow"
-        risk_level = "low"
+    reasons = _dedup(reasons)
+    risk_tags = normalize_taskguard_tags(reasons, ir_type="plan", mode=mode)
+    decision = taskguard_decision_from_tags(risk_tags)
+    risk_level = taskguard_risk_level(decision, risk_tags)
+    risk_score = taskguard_risk_score(risk_tags, decision)
 
     return {
         "decision": decision,
         "risk_level": risk_level,
+        "risk_score": risk_score,
+        "risk_tags": risk_tags,
         "reasons": sorted(set(reasons)),
         "step_results": step_results,
         "audit_plan": {

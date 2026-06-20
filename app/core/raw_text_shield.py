@@ -1,6 +1,6 @@
 import os
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import List, Optional, Tuple
 
 
@@ -11,6 +11,7 @@ class RawTextShieldResult:
     label: str
     reasons: List[str]
     backend: str
+    risk_tags: List[str] | None = None
     translated_text: Optional[str] = None
     model_input: Optional[str] = None
     model_label: Optional[str] = None
@@ -22,13 +23,34 @@ class RawTextShieldResult:
 
 
 class RawTextShield:
+    """RawShield 只负责提示注入/越狱前置检测。
+
+    业务语义风险（越权、禁区、危险动作、审计逃避、指定机器狗等）全部交给
+    TaskGuard-S 处理，避免 RawShield 和 TaskGuard 的边界混乱。
+    """
+
+    RAW_REASON_TO_TAG = {
+        "override_rule_phrase": "prompt_injection",
+        "direct_jailbreak_phrase": "jailbreak",
+        "model_label_malicious": "prompt_injection",
+        "model_label_injection": "prompt_injection",
+        "model_label_prompt_injection": "prompt_injection",
+        "model_label_jailbreak": "jailbreak",
+        "model_label_unsafe": "prompt_injection",
+        "model_label_attack": "prompt_injection",
+    }
+
     def __init__(self):
         self.enabled = os.getenv("RAW_SHIELD_ENABLED", "true").lower() == "true"
         self.backend = os.getenv("RAW_SHIELD_BACKEND", "heuristic").strip()
         self.model_name = os.getenv("RAW_SHIELD_MODEL", "").strip()
 
-        self.block_threshold = float(os.getenv("RAW_SHIELD_BLOCK_THRESHOLD", "0.80"))
-        self.confirm_threshold = float(os.getenv("RAW_SHIELD_CONFIRM_THRESHOLD", "0.45"))
+        # 收紧 RawShield：PromptGuard 判断为恶意时更快进入 block。
+        # 即使 .env 里还写着 0.80，这里也会把实际阻断阈值收紧到 <=0.60。
+        configured_block = float(os.getenv("RAW_SHIELD_BLOCK_THRESHOLD", "0.60"))
+        configured_confirm = float(os.getenv("RAW_SHIELD_CONFIRM_THRESHOLD", "0.45"))
+        self.block_threshold = min(configured_block, 0.60)
+        self.confirm_threshold = min(configured_confirm, 0.45)
 
         self._clf = None
         self._model_available = False
@@ -55,8 +77,17 @@ class RawTextShield:
             self._clf = None
             print(f"[RawTextShield] Prompt Guard 2 load failed, fallback to heuristic: {e}")
 
+    def _risk_tags_from_reasons(self, reasons: List[str]) -> List[str]:
+        tags: List[str] = []
+        for reason in reasons:
+            tag = self.RAW_REASON_TO_TAG.get(reason)
+            if tag and tag not in tags:
+                tags.append(tag)
+        return tags
+
     def scan_heuristic(self, text: str) -> RawTextShieldResult:
         heuristic_score, reasons = self._heuristic_scan(text)
+        risk_tags = self._risk_tags_from_reasons(reasons)
 
         if heuristic_score >= self.block_threshold:
             decision = "block"
@@ -68,12 +99,14 @@ class RawTextShield:
             decision = "allow"
             label = "benign"
             reasons = []
+            risk_tags = []
 
         return RawTextShieldResult(
             decision=decision,
             risk_score=round(heuristic_score, 4),
             label=label,
             reasons=reasons,
+            risk_tags=risk_tags,
             backend="heuristic",
             heuristic_score=round(heuristic_score, 4),
         )
@@ -85,6 +118,7 @@ class RawTextShield:
                 risk_score=0.0,
                 label="benign",
                 reasons=[],
+                risk_tags=[],
                 backend="disabled",
             )
 
@@ -93,36 +127,38 @@ class RawTextShield:
         model_score = 0.0
         model_label = None
         model_reasons: List[str] = []
-
         model_input = translated_text or text
 
         if self.backend == "prompt_guard2" and self._model_available and model_input:
             model_score, model_label = self._prompt_guard_score(model_input)
-
             if model_score >= self.confirm_threshold:
                 model_reasons.append(f"model_label_{model_label}")
         elif self.backend == "prompt_guard2" and not self._model_available:
             model_reasons.append("prompt_guard2_unavailable_fallback_to_heuristic")
 
-        risk_score = max(heuristic_score, model_score)
         reasons = list(dict.fromkeys(heuristic_reasons + model_reasons))
+        risk_tags = self._risk_tags_from_reasons(reasons)
+        risk_score = max(heuristic_score, model_score)
 
-        if risk_score >= self.block_threshold:
+        # 收紧：只要命中模型恶意或启发式提示注入/越狱，超过 0.60 即 block。
+        if risk_tags and risk_score >= self.block_threshold:
             decision = "block"
             label = "malicious"
-        elif risk_score >= self.confirm_threshold:
+        elif risk_tags and risk_score >= self.confirm_threshold:
             decision = "need_confirmation"
             label = "suspicious"
         else:
             decision = "allow"
             label = "benign"
             reasons = []
+            risk_tags = []
 
         return RawTextShieldResult(
             decision=decision,
             risk_score=round(risk_score, 4),
             label=label,
             reasons=reasons,
+            risk_tags=risk_tags,
             backend=self.backend if self._model_available else "heuristic",
             translated_text=translated_text,
             model_input=model_input,
@@ -132,87 +168,49 @@ class RawTextShield:
         )
 
     def _heuristic_scan(self, text: str) -> Tuple[float, List[str]]:
+        # 注意：这里只有提示注入/越狱；审计逃避、关闭安全、管理员模式等业务语义风险交给 TaskGuard-S。
         t = text.lower()
         reasons: List[str] = []
         score = 0.0
 
         patterns = {
             "override_rule_phrase": [
-                r"忽略.{0,8}(之前|以上|前面).{0,8}(规则|指令|要求)",
-                r"无视.{0,8}(规则|限制|安全策略|安全闸门)",
-                r"忘记.{0,8}(规则|限制|安全策略)",
-                r"覆盖.{0,8}(规则|策略|限制)",
-                r"ignore\s+(previous|above|all)\s+(rules|instructions|policy|policies)",
-                r"disregard\s+(previous|above|all)\s+(rules|instructions)",
-            ],
-            "disable_security_phrase": [
-                r"绕过.{0,8}(安全|闸门|检查|策略|审核)",
-                r"跳过.{0,8}(安全|闸门|检查|策略|审核)",
-                r"关闭.{0,8}(安全|闸门|检查|审计|日志)",
-                r"禁用.{0,8}(安全|闸门|检查|审计|日志)",
-                r"bypass\s+(security|safety|guard|check|checks|policy)",
-                r"disable\s+(security|safety|guard|audit|logging)",
-            ],
-            "audit_evasion_phrase": [
-                r"不要.{0,8}(记录|日志|审计|上报)",
-                r"别.{0,8}(记录|日志|审计|上报)",
-                r"不写.{0,8}(日志|审计)",
-                r"秘密执行",
-                r"暗中执行",
-                r"不要告诉",
-                r"do\s+not\s+(log|record|audit|report)",
-                r"don't\s+(log|record|audit|report)",
-                r"secretly\s+execute",
-            ],
-            "privilege_escalation_phrase": [
-                r"管理员模式",
-                r"最高权限",
-                r"超级用户",
-                r"root权限",
-                r"开发者模式",
-                r"强制执行",
-                r"admin\s+mode",
-                r"administrator\s+mode",
-                r"root\s+permission",
-                r"developer\s+mode",
-                r"force\s+execute",
+                r"忽略.{0,10}(之前|以上|前面|所有|全部).{0,10}(规则|指令|要求|限制|策略)",
+                r"无视.{0,10}(之前|以上|前面|所有|全部).{0,10}(规则|指令|要求|限制|策略)",
+                r"忘记.{0,10}(之前|以上|前面|所有|全部).{0,10}(规则|指令|要求|限制|策略)",
+                r"覆盖.{0,10}(系统|安全|原有).{0,10}(规则|指令|策略)",
+                r"ignore\s+(previous|above|all|prior)\s+(rules|instructions|instruction|policy|policies)",
+                r"disregard\s+(previous|above|all|prior)\s+(rules|instructions|instruction|policy|policies)",
+                r"forget\s+(previous|above|all|prior)\s+(rules|instructions|instruction|policy|policies)",
             ],
             "direct_jailbreak_phrase": [
-                r"你现在不是",
-                r"解除限制",
+                r"你现在不是.{0,12}(安全系统|机器人|智能体|助手)",
+                r"不需要.{0,8}(遵守|执行).{0,8}(限制|规则|安全策略)",
+                r"解除.{0,8}(限制|安全限制|系统限制)",
                 r"越狱",
-                r"jailbreak",
+                r"开启.{0,6}开发者模式",
                 r"dan\s+mode",
+                r"jailbreak",
                 r"developer\s+mode",
                 r"ignore\s+previous\s+instructions",
             ],
         }
 
         weights = {
-            "override_rule_phrase": 0.70,
-            "disable_security_phrase": 0.70,
-            "audit_evasion_phrase": 0.55,
-            "privilege_escalation_phrase": 0.65,
-            "direct_jailbreak_phrase": 0.70,
+            "override_rule_phrase": 0.88,
+            "direct_jailbreak_phrase": 0.88,
         }
 
         for reason, pats in patterns.items():
             for pat in pats:
                 if re.search(pat, t, flags=re.IGNORECASE):
                     reasons.append(reason)
-                    score = max(score, weights.get(reason, 0.45))
+                    score = max(score, weights.get(reason, 0.60))
                     break
 
-        reason_set = set(reasons)
-
-        if "override_rule_phrase" in reason_set and "disable_security_phrase" in reason_set:
-            score = max(score, 0.82)
-
-        if "disable_security_phrase" in reason_set and "audit_evasion_phrase" in reason_set:
-            score = max(score, 0.90)
-
-        if len(reason_set) >= 3:
-            score = max(score, 0.90)
+        # 多个攻击信号叠加时直接高危。
+        if len(set(reasons)) >= 2:
+            score = max(score, 0.95)
 
         return score, reasons
 
@@ -260,6 +258,7 @@ class RawTextShield:
         )
 
         if malicious_score >= benign_score and malicious_score > 0:
+            # 模型只输出 malicious，标签语义统一归入 prompt_injection。
             return malicious_score, "malicious"
 
         return malicious_score, "benign"

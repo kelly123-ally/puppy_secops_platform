@@ -136,6 +136,82 @@ document.getElementById("logout-btn").addEventListener("click", async () => {
   location.href = "/";
 });
 
+function arrayField(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function hasRiskTag(result, tag) {
+  const tags = arrayField(result?.risk_tags);
+  return tags.includes(tag);
+}
+
+function isBlockedResult(result) {
+  if (!result) return false;
+  return result.decision === "block" ||
+    result.stage === "task_blocked" ||
+    result.stage === "task_guard_blocked" ||
+    (result.ok === false && result.risk_level === "high" && result.decision !== "need_confirmation");
+}
+
+function isPlanNeedConfirmation(result) {
+  if (!result) return false;
+  if (result.decision === "block") return false;
+  if (result.stage === "plan_need_confirmation" && result.plan_id) return true;
+  if (result.confirmation_type === "complex_task" && result.plan_id) return true;
+  if (result.plan_id && hasRiskTag(result, "complex_task") && result.decision === "need_confirmation") return true;
+  if (result.plan_id && result.ir_type === "plan" && result.decision === "need_confirmation") return true;
+  if (result.plan_id && result.mode && ["parallel", "sequential"].includes(result.mode) && result.decision === "need_confirmation") return true;
+  return false;
+}
+
+function normalizePlanPreview(result = {}) {
+  const preview = result.plan_preview || result.preview || result.parsed_ir || result.plan_candidate || result.plan_ir || {};
+  const parsed = result.parsed_ir || {};
+  const steps =
+    Array.isArray(preview.steps) ? preview.steps :
+    Array.isArray(parsed.steps) ? parsed.steps :
+    arrayField(result.steps);
+
+  return {
+    plan_id: result.plan_id || preview.plan_id || parsed.plan_id,
+    plan_hash: result.plan_hash || preview.plan_hash || parsed.plan_hash,
+    mode: result.mode || preview.mode || parsed.mode || "plan",
+    steps,
+    risk_tags: arrayField(result.risk_tags),
+    reasons: arrayField(result.reasons),
+  };
+}
+
+async function handlePlanNeedConfirmation(result) {
+  const preview = normalizePlanPreview(result);
+  const ok = await showPlanConfirmModal(preview);
+  if (ok) {
+    const payload = { plan_id: result.plan_id || preview.plan_id };
+    if (result.plan_hash || preview.plan_hash) payload.plan_hash = result.plan_hash || preview.plan_hash;
+    await postJSON("/api/plans/confirm", payload);
+  } else {
+    await postJSON("/api/plans/cancel", { plan_id: result.plan_id || preview.plan_id });
+  }
+}
+
+async function handleBlockedResult(result) {
+  const riskTags = arrayField(result?.risk_tags);
+  const reasons = arrayField(result?.reasons);
+  const allReasons = [...new Set([...riskTags, ...reasons])];
+  const reasonText = allReasons.length ? allReasons.map(reasonLabel).join("、") : "高风险任务语义";
+
+  await showInfoModal({
+    title: "任务已阻断",
+    subtitle: "TaskGuard 检测到高风险任务",
+    message:
+      `${result?.message || "任务包含高风险语义，已被系统阻断。"}\n\n` +
+      `原因：${reasonText}`,
+    okText: "知道了",
+    tone: "danger",
+    tags: riskTags
+  });
+}
+
 document.getElementById("nl-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const fd = new FormData(e.target);
@@ -148,21 +224,22 @@ document.getElementById("nl-form").addEventListener("submit", async (e) => {
   try {
     const result = await postJSON("/api/tasks/natural", Object.fromEntries(fd.entries()));
 
-    // 单任务需要确认：一般是字段缺失、条件型表达不自动执行、模型解析不确定等。
-    if (result && result.stage === "need_confirmation") {
-      await handleSingleTaskNeedConfirmation(result);
+    // 最高优先级：block 永远直接阻断，不允许进入复杂任务确认。
+    if (isBlockedResult(result)) {
+      await handleBlockedResult(result);
       return;
     }
 
-    // 长难句/多步骤任务：后端只保存 PlanIR，不立即执行；用户确认后才编译为子任务。
-    if (result && result.stage === "plan_need_confirmation" && result.plan_id) {
-      const preview = result.plan_preview || {};
-      const ok = await showPlanConfirmModal(preview);
-      if (ok) {
-        await postJSON("/api/plans/confirm", {plan_id: result.plan_id});
-      } else {
-        await postJSON("/api/plans/cancel", {plan_id: result.plan_id});
-      }
+    // 只有 need_confirmation 的复杂/长难句任务才弹“复杂任务确认”。
+    if (isPlanNeedConfirmation(result)) {
+      await handlePlanNeedConfirmation(result);
+      return;
+    }
+
+    // 普通单任务确认：字段缺失、越权操作、条件型表达、模型解析不确定等。
+    if (result && (result.stage === "need_confirmation" || result.decision === "need_confirmation")) {
+      await handleSingleTaskNeedConfirmation(result);
+      return;
     }
   } finally {
     // 恢复按钮
@@ -174,11 +251,29 @@ document.getElementById("nl-form").addEventListener("submit", async (e) => {
 
 function reasonLabel(reason) {
   const labels = {
+    // TaskGuard 简化风险标签
+    task_unclear: "任务信息不完整或语义不清",
+    unauthorized_operation: "存在越权/指定终端/强制执行风险",
+    restricted_target: "目标区域受限或不允许访问",
+    dangerous_action: "包含危险动作或关闭安全机制要求",
+    semantic_mismatch: "原始文本与结构化解析不一致",
+    complex_task: "复杂/多步骤任务需要确认",
+
+    // 兼容旧 reasons
     site_not_clear: "目标区域不明确",
+    missing_site: "目标区域缺失",
     cargo_type_not_clear: "物资类型不明确",
+    missing_cargo_type: "物资类型缺失",
     coordinates_not_available: "目标坐标不可用",
+    missing_coordinates: "目标坐标不可用",
     unsupported_if_then_task: "条件型表达不自动执行",
     natural_language_ambiguous: "自然语言存在歧义",
+    target_robot_mentioned_in_text: "用户直接指定具体机器狗",
+    target_robot_present: "结构化任务包含指定机器狗",
+    dangerous_control_phrase: "自然语言包含危险控制动作",
+    control_action_present: "结构化任务包含控制动作",
+    forbidden_area_requested: "请求进入受限区域",
+    invalid_site: "目标区域非法或不可用",
     plan_step_needs_confirmation: "子任务需要确认",
   };
   return labels[reason] || reason;
@@ -194,39 +289,71 @@ function fillStructuredTaskForm(candidate) {
 }
 
 async function handleSingleTaskNeedConfirmation(result) {
-  const reasons = Array.isArray(result.reasons) ? result.reasons : [];
-  const candidate = result.fill_suggestion || result.task_candidate || {};
-  const reasonText = reasons.length ? reasons.map(reasonLabel).join("、") : "解析结果需要确认";
+  // 兜底：如果后端把 complex_task 用 need_confirmation 返回，仍然走计划确认弹窗。
+  if (isPlanNeedConfirmation(result)) {
+    await handlePlanNeedConfirmation(result);
+    return;
+  }
 
-  if (reasons.includes("unsupported_if_then_task")) {
+  const reasons = arrayField(result.reasons);
+  const riskTags = arrayField(result.risk_tags);
+  const allReasons = [...new Set([...riskTags, ...reasons])];
+  const candidate = result.fill_suggestion || result.task_candidate || result.parsed_ir || {};
+  const reasonText = allReasons.length ? allReasons.map(reasonLabel).join("、") : "解析结果需要确认";
+
+  if (riskTags.includes("unauthorized_operation")) {
     await showInfoModal({
-      title: "条件型任务提示",
-      subtitle: "当前版本不自动执行 if-then 条件分支",
+      title: "操作需要人工确认",
+      subtitle: "检测到越权调度或指定终端风险",
       message:
-        `${result.message || "检测到条件型任务表达"}\n\n` +
-        `原因：${reasonText}\n\n` +
-        "系统会持续返回机器狗状态。如果控制台收到异常事件，请由操作员根据状态回传结果再次下发具体任务。",
+        `${result.message || "任务包含需要人工确认的调度约束"}
+
+` +
+        `原因：${reasonText}
+
+` +
+        "请确认该任务是否确由授权操作员发起，必要时改用结构化任务表单重新提交。",
       okText: "知道了",
-      tone: "warning"
+      tone: "warning",
+      tags: riskTags
     });
     return;
   }
 
-  const ok = await showConfirmModal({
-    title: "任务信息不完整",
-    subtitle: "请确认或补全字段后再提交",
-    message:
-      `${result.message || "任务需要人工确认"}\n\n` +
-      `原因：${reasonText}\n\n` +
-      "是否将已识别字段填入右侧结构化任务表单，由你补全后再提交？",
-    okText: "填入表单",
-    cancelText: "取消",
-    tone: "warning"
-  });
+  if (riskTags.includes("task_unclear") || reasons.includes("unsupported_if_then_task")) {
+    const ok = await showConfirmModal({
+      title: reasons.includes("unsupported_if_then_task") ? "条件型任务提示" : "任务信息不完整",
+      subtitle: reasons.includes("unsupported_if_then_task") ? "当前版本不自动执行 if-then 条件分支" : "请确认或补全字段后再提交",
+      message:
+        `${result.message || "任务需要人工确认"}
 
-  if (ok) {
-    fillStructuredTaskForm(candidate);
+` +
+        `原因：${reasonText}
+
+` +
+        "是否将已识别字段填入右侧结构化任务表单，由你补全后再提交？",
+      okText: "填入表单",
+      cancelText: "取消",
+      tone: "warning",
+      tags: riskTags
+    });
+
+    if (ok) fillStructuredTaskForm(candidate);
+    return;
   }
+
+  await showInfoModal({
+    title: "任务需要人工确认",
+    subtitle: "TaskGuard 识别到中风险任务语义",
+    message:
+      `${result.message || "任务需要人工确认后再执行"}
+
+` +
+      `原因：${reasonText}`,
+    okText: "知道了",
+    tone: "warning",
+    tags: riskTags
+  });
 }
 
 
@@ -234,35 +361,52 @@ function showPlanConfirmModal(preview = {}) {
   const steps = Array.isArray(preview.steps) ? preview.steps : [];
   const mode = preview.mode || "plan";
   const modeLabel = mode === "parallel" ? "并行" : mode === "sequential" ? "顺序" : "多步骤";
+  const riskTags = arrayField(preview.risk_tags);
+  const reasons = arrayField(preview.reasons);
+  const reasonText = riskTags.length || reasons.length
+    ? [...new Set([...riskTags, ...reasons])].map(reasonLabel).join("、")
+    : "复杂任务需要确认";
   const stepLines = steps.length
     ? steps.map(s => {
         const stepId = s.step_id || "step";
         const site = s.site || "未知区域";
         const cargo = s.cargo_type || "未知物资";
         const note = s.note || "";
-        return `${stepId}：${site} / ${cargo}${note ? ` / ${note}` : ""}`;
+        const depends = Array.isArray(s.depends_on) && s.depends_on.length ? ` / 依赖 ${s.depends_on.join(",")}` : "";
+        return `${stepId}：${site} / ${cargo}${note ? ` / ${note}` : ""}${depends}`;
       }).join("\n")
     : "未返回具体步骤";
 
   const extra = mode === "parallel"
-    ? "两个步骤无依赖关系，确认后会批量进入调度队列；如果存在两条空闲机器狗，将分别分配并行执行。"
+    ? "该任务被识别为并行计划。确认后，系统会将每个子任务单独生成 task_id 和 lease_id，并进入调度队列。"
     : mode === "sequential"
-      ? "后一步会等待前一步完成后再启动；每一步都会单独生成新的 task_id 和 lease_id。"
+      ? "该任务被识别为顺序计划。确认后，后一步会等待前一步完成后再启动，每一步都会单独生成 task_id 和 lease_id。"
       : "确认后，系统会按照计划步骤逐项编译为受控任务。";
+
+  const hashLine = preview.plan_hash ? `
+候选计划指纹：${preview.plan_hash}
+` : "";
 
   return showConfirmModal({
     title: "复杂任务确认",
     subtitle: `系统解析到${modeLabel}计划，请确认后执行`,
     message:
-      `系统理解为：\n${stepLines}\n\n` +
-      "确认后，每个步骤会单独生成 task_id 和 lease_id。\n\n" +
+      `原因：${reasonText}
+
+` +
+      `系统理解为：
+${stepLines}
+` +
+      hashLine +
+      "\n确认后，每个步骤会单独生成 task_id 和 lease_id。\n\n" +
       extra,
-    tags: [`mode = ${mode}`, "requires_confirmation", `${steps.length || 0} steps`],
+    tags: [`mode = ${mode}`, "complex_task", `${steps.length || 0} steps`],
     okText: "确认执行",
     cancelText: "取消",
     tone: "info"
   });
 }
+
 
 function showConfirmModal({
   title = "任务确认",
@@ -426,7 +570,7 @@ async function postJSON(url, payload) {
     const reasons = Array.isArray(data.reasons) && data.reasons.length
       ? `：${data.reasons.join(', ')}`
       : '';
-    const type = ['plan_need_confirmation', 'need_confirmation'].includes(data.stage) ? 'info' : 'error';
+    const type = (data.decision === "need_confirmation" || ['plan_need_confirmation', 'need_confirmation'].includes(data.stage)) ? 'info' : 'error';
     showNotification(`${data.message || data.reason || '操作被拒绝'}${reasons}`, type);
     return data;
   }
@@ -526,7 +670,7 @@ function renderSecurityMonitoring(snapshot) {
 let lastSecurityAlertsData = null;
 
 function renderSecurityAlerts(audit) {
-  const alerts = audit.slice(-10).reverse(); // 最近10条，倒序显示
+  const alerts = audit.slice(0, 10); // audit 后端已按最新在前排序，取最新10条
   const alertsKey = alerts.map(a => `${a.title}-${a.ts}`).join('|');
   
   if (lastSecurityAlertsData === alertsKey) return;
@@ -1145,8 +1289,8 @@ function auditClass(item) {
 let lastAuditData = null;
 
 function renderAudit(snapshot) {
-  const logs = (snapshot.audit || []).slice(-30);
-  const auditKey = logs.map(item => `${item.title}-${item.ts}`).join('|');
+  const logs = (snapshot.audit || []).slice(0, 50); // audit 后端已按最新在前排序，取最新50条
+  const auditKey = logs.map(item => `${item.title}-${item.ts}-${JSON.stringify(item.details || {})}`).join('|');
   
   if (lastAuditData === auditKey) return;
   lastAuditData = auditKey;

@@ -7,6 +7,10 @@ from app.core.guard_translator import translate_for_guard_via_qwen
 from .core.qwen_client import parse_task_via_qwen, parse_plan_via_qwen
 from .core.task_guard import validate_task_candidate
 from .core.plan_guard import validate_plan_ir
+from .core.taskguard_taxonomy import (
+    build_taskguard_record,
+    clean_taskguard_ir,
+)
 
 from fastapi import APIRouter, Body, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -109,30 +113,30 @@ def _rawshield_public_audit(result, *, raw_text: str, username: str, confirmed: 
     """
     面向前端审计日志的 RawShield 摘要。
 
-    注意：
-    1. 不展示 translated_text / model_input，避免把英文翻译文本暴露到审计面板；
-    2. 不展示 backend=heuristic 这类内部实现细节；
-    3. 统一以 RawShield-PromptGuard 作为前置语义安全检测模块展示；
-    4. 保留风险分数、模型标签、模型分数、融合策略和原因，便于报告展示。
+    RawShield 只负责提示注入/越狱前置检测，不承担业务语义风险判断。
+    业务越权、禁区、危险动作、审计逃避等交给 TaskGuard-S。
     """
     risk_score = float(getattr(result, "risk_score", 0.0) or 0.0)
+    risk_tags = list(getattr(result, "risk_tags", []) or [])
 
-    if risk_score >= 0.80:
+    if risk_score >= 0.60 and risk_tags:
         risk_level = "high"
-    elif risk_score >= 0.45:
+    elif risk_score >= 0.45 and risk_tags:
         risk_level = "medium"
     else:
         risk_level = "low"
 
     return {
+        "stage": "RawShield",
         "raw_text": raw_text,
         "decision": getattr(result, "decision", "allow"),
         "risk_score": risk_score,
         "risk_level": risk_level,
+        "risk_tags": risk_tags,
         "label": getattr(result, "label", "benign"),
         "reasons": getattr(result, "reasons", []),
         "guard_engine": "RawShield-PromptGuard",
-        "fusion_policy": "semantic_guard + scenario_risk_fusion",
+        "fusion_policy": "prompt_guard + strict_threshold",
         "model_label": getattr(result, "model_label", None),
         "model_score": getattr(result, "model_score", 0.0),
         "confirmed": confirmed,
@@ -155,8 +159,9 @@ async def _run_raw_text_shield_before_parse(
     不在前端审计面板展示 heuristic / prompt_guard2 等内部 backend 字段。
     """
 
-    # 1) 中文原文场景风险预检。
-    # 明显高危直接阻断，避免攻击文本进入任务解析。
+    # 1) 中文原文提示注入/越狱预检。
+    # 注意：即使命中启发式高危，也不在这里提前 return；
+    # 继续做英文直译并送入 PromptGuard，这样审计中能保留 model_label/model_score。
     heuristic_result = raw_text_shield.scan_heuristic(text)
 
     print("\n[RAWSHIELD] ===== pre-parse security check =====", flush=True)
@@ -165,36 +170,11 @@ async def _run_raw_text_shield_before_parse(
     print("[RAWSHIELD] heuristic_score:", heuristic_result.risk_score, flush=True)
     print("[RAWSHIELD] heuristic_reasons:", heuristic_result.reasons, flush=True)
 
-    if heuristic_result.decision == "block":
-        public_audit = _rawshield_public_audit(
-            heuristic_result,
-            raw_text=text,
-            username=username,
-            confirmed=confirmed,
-        )
-
-        simulator.log(
-            "warn",
-            "RawShield",
-            "RawShield_checked",
-            public_audit,
-        )
-
-        return {
-            "ok": False,
-            "decision": "block",
-            "stage": "RawShield",
-            "message": "RawShield 检测到规则覆盖、安全绕过、审计规避或权限提升等高风险表达，任务已在智能体解析前阻断。",
-            "risk_level": public_audit["risk_level"],
-            "reasons": public_audit["reasons"],
-            "raw_text_shield": public_audit,
-        }
-
     # 2) 受约束英文直译。
     # 翻译结果只作为 PromptGuard 检测输入，不写入前端审计字段，也不进入结构化任务。
     translated_for_guard = await translate_for_guard_via_qwen(text)
 
-    # 3) PromptGuard 检测英文翻译，并与中文场景风险融合。
+    # 3) PromptGuard 检测英文翻译，并与中文提示注入/越狱启发式分数融合。
     shield_result = raw_text_shield.scan(
         text,
         translated_text=translated_for_guard,
@@ -226,7 +206,7 @@ async def _run_raw_text_shield_before_parse(
             "ok": False,
             "decision": "block",
             "stage": "RawShield",
-            "message": "RawShield 检测到提示注入、越狱或安全绕过风险，任务已在智能体解析前阻断。",
+            "message": "RawShield 检测到提示注入或越狱风险，任务已在智能体解析前阻断。",
             "risk_level": public_audit["risk_level"],
             "reasons": public_audit["reasons"],
             "raw_text_shield": public_audit,
@@ -238,7 +218,7 @@ async def _run_raw_text_shield_before_parse(
             "decision": "need_confirmation",
             "confirmation_type": "raw_text_risk",
             "stage": "RawShield",
-            "message": "RawShield 检测到可疑语义风险，需要确认后才允许进入任务解析。",
+            "message": "RawShield 检测到可疑提示注入/越狱风险，需要确认后才允许进入任务解析。",
             "risk_level": public_audit["risk_level"],
             "reasons": public_audit["reasons"],
             "raw_text_shield": public_audit,
@@ -303,27 +283,36 @@ async def api_natural_task(request: Request, payload: dict = Body(...)):
         print("[GUARD] decision:", guard_result["decision"], flush=True)
         print("[GUARD] reasons:", guard_result["reasons"], flush=True)
 
+        taskguard_record = build_taskguard_record(
+            raw_text=text,
+            ir_type="single_task",
+            mode="single",
+            decision=guard_result["decision"],
+            reasons=guard_result.get("reasons", []),
+            parsed_ir=guard_result.get("audit_candidate", {}),
+            final_task=guard_result.get("final_task"),
+            username=user.username,
+        )
+
         simulator.log(
-            "info" if guard_result["decision"] == "allow" else "warn",
-            "guard",
-            "nl_candidate_checked",
-            {
-                "raw_text": text,
-                "decision": guard_result["decision"],
-                "risk_level": guard_result["risk_level"],
-                "reasons": guard_result["reasons"],
-                "candidate": guard_result["audit_candidate"],
-            },
+            "info" if taskguard_record["decision"] == "allow" else "warn",
+            "TaskGuard",
+            "TaskGuard_checked",
+            taskguard_record,
         )
 
         if guard_result["decision"] == "block":
             return {
                 "ok": False,
-                "stage": "task_guard",
+                "stage": "task_blocked",
+                "confirmation_type": None,
+                "decision": "block",
                 "message": "任务被安全策略阻断",
-                "risk_level": guard_result["risk_level"],
-                "reasons": guard_result["reasons"],
-                "task_candidate": guard_result["audit_candidate"],
+                "risk_level": taskguard_record["risk_level"],
+                "risk_score": taskguard_record["risk_score"],
+                "risk_tags": taskguard_record["risk_tags"],
+                "reasons": taskguard_record["reasons"],
+                "task_candidate": taskguard_record["parsed_ir"],
             }
 
         if guard_result["decision"] == "need_confirmation":
@@ -337,22 +326,22 @@ async def api_natural_task(request: Request, payload: dict = Body(...)):
                 "stage": "need_confirmation",
                 "confirmation_type": "task_fields",
                 "message": message,
-                "risk_level": guard_result["risk_level"],
+                "risk_level": taskguard_record["risk_level"],
+                "risk_score": taskguard_record["risk_score"],
+                "risk_tags": taskguard_record["risk_tags"],
                 "reasons": reasons,
-                "task_candidate": guard_result["audit_candidate"],
-                "fill_suggestion": guard_result["audit_candidate"],
+                "task_candidate": taskguard_record["parsed_ir"],
+                "fill_suggestion": taskguard_record["parsed_ir"],
             }
 
         final_task = guard_result["final_task"]
+        allowed_record = dict(taskguard_record)
+        allowed_record["final_task"] = clean_taskguard_ir(final_task)
         simulator.log(
             "info",
-            "guard",
-            "nl_task_allowed",
-            {
-                "raw_text": text,
-                "final_task": final_task,
-                "candidate": guard_result["audit_candidate"],
-            },
+            "TaskGuard",
+            "TaskGuard_allowed",
+            allowed_record,
         )
         return simulator.submit_signed_task(
             final_task,
@@ -368,30 +357,55 @@ async def api_natural_task(request: Request, payload: dict = Body(...)):
     print("[PLAN_GUARD] decision:", plan_guard["decision"], flush=True)
     print("[PLAN_GUARD] reasons:", plan_guard["reasons"], flush=True)
 
+    step_results_for_audit = []
+    for step in plan_guard.get("step_results", []):
+        step_results_for_audit.append(
+            {
+                "stage": "TaskGuard",
+                "guard_engine": "TaskGuard-S",
+                "step_id": step.get("step_id"),
+                "decision": step.get("decision", "allow"),
+                "risk_level": step.get("risk_level", "low"),
+                "risk_score": step.get("risk_score", 0.0),
+                "risk_tags": step.get("risk_tags", []),
+                "reasons": step.get("reasons", []),
+                "parsed_ir": clean_taskguard_ir(step.get("audit_candidate", {})),
+                "final_task": clean_taskguard_ir(step.get("final_task", {})),
+            }
+        )
+
+    taskguard_record = build_taskguard_record(
+        raw_text=text,
+        ir_type="plan",
+        mode=plan_ir.get("mode", "single"),
+        decision=plan_guard["decision"],
+        reasons=plan_guard.get("reasons", []),
+        parsed_ir=plan_ir,
+        step_results=step_results_for_audit,
+        username=user.username,
+        plan_id=plan_ir.get("plan_id"),
+    )
+
     simulator.log(
-        "info" if plan_guard["decision"] == "allow" else "warn",
-        "plan_guard",
-        "plan_candidate_checked",
-        {
-            "raw_text": text,
-            "plan_id": plan_ir.get("plan_id"),
-            "mode": plan_ir.get("mode"),
-            "decision": plan_guard["decision"],
-            "risk_level": plan_guard["risk_level"],
-            "reasons": plan_guard["reasons"],
-            "step_results": plan_guard["step_results"],
-        },
+        "info" if taskguard_record["decision"] == "allow" else "warn",
+        "TaskGuard",
+        "TaskGuard_checked",
+        taskguard_record,
     )
 
     if plan_guard["decision"] == "block":
         return {
             "ok": False,
-            "stage": "plan_guard",
-            "message": "长难句计划被安全策略阻断",
-            "risk_level": plan_guard["risk_level"],
-            "reasons": plan_guard["reasons"],
-            "plan_candidate": plan_ir,
-            "step_results": plan_guard["step_results"],
+            "stage": "task_blocked",
+            "confirmation_type": None,
+            "decision": "block",
+            "message": "长难句计划被 TaskGuard-S 安全策略阻断",
+            "risk_level": taskguard_record["risk_level"],
+            "risk_score": taskguard_record["risk_score"],
+            "risk_tags": taskguard_record["risk_tags"],
+            "reasons": taskguard_record["reasons"],
+            "plan_candidate": taskguard_record["parsed_ir"],
+            "step_results": taskguard_record.get("step_results", []),
         }
 
     if plan_guard["decision"] == "need_confirmation":
@@ -406,7 +420,11 @@ async def api_natural_task(request: Request, payload: dict = Body(...)):
 async def api_confirm_plan(request: Request, payload: dict = Body(...)):
     user = require_roles(request, {"admin", "operator"})
     simulator = get_simulator(request.app)
-    return simulator.confirm_plan(str(payload.get("plan_id", "")), actor=user.username)
+    return simulator.confirm_plan(
+        str(payload.get("plan_id", "")),
+        actor=user.username,
+        plan_hash=payload.get("plan_hash"),
+    )
 
 
 @router.post("/api/plans/cancel")

@@ -702,23 +702,41 @@ class FleetSimulator:
             plan_ir["requested_by"] = actor
             plan_ir["guard"] = guard_result
             self.pending_plan_confirmations[plan_id] = plan_ir
-            self.log("warn", "plan", "plan_need_confirmation", {
+            self.log("warn", "TaskGuard", "TaskGuard_need_confirmation", {
+                "stage": "TaskGuard",
+                "guard_engine": "TaskGuard-S",
+                "label_schema": guard_result.get("label_schema", "taskguard"),
                 "plan_id": plan_id,
                 "mode": plan_ir.get("mode"),
                 "step_count": len(plan_ir.get("steps", [])),
+                "decision": guard_result.get("decision", "need_confirmation"),
+                "risk_level": guard_result.get("risk_level", "medium"),
+                "risk_score": guard_result.get("risk_score", 0.55),
+                "risk_tags": guard_result.get("risk_tags", ["complex_task"]),
                 "reasons": guard_result.get("reasons", []),
                 "plan_hash": plan_ir["plan_hash"],
                 "actor": actor,
             })
+            preview = self._plan_preview(plan_ir)
+            preview["plan_hash"] = plan_ir["plan_hash"]
+            preview["risk_tags"] = guard_result.get("risk_tags", ["complex_task"])
+            preview["reasons"] = guard_result.get("reasons", [])
+
             return {
                 "ok": False,
                 "stage": "plan_need_confirmation",
-                "message": "检测到多步骤/长难句任务，需要确认系统解析出的计划后再执行",
+                "confirmation_type": "complex_task",
+                "guard_stage": "TaskGuard",
+                "decision": "need_confirmation",
+                "message": "检测到长难句/多步骤任务，需要确认系统解析出的计划后再执行",
                 "plan_id": plan_id,
                 "plan_hash": plan_ir["plan_hash"],
                 "mode": plan_ir.get("mode"),
+                "risk_level": guard_result.get("risk_level", "medium"),
+                "risk_score": guard_result.get("risk_score", 0.55),
+                "risk_tags": guard_result.get("risk_tags", ["complex_task"]),
                 "reasons": guard_result.get("reasons", []),
-                "plan_preview": self._plan_preview(plan_ir),
+                "plan_preview": preview,
                 "confirm_endpoint": "/api/plans/confirm",
             }
 
@@ -741,7 +759,7 @@ class FleetSimulator:
             ],
         }
 
-    def confirm_plan(self, plan_id: str, actor: str) -> Dict[str, Any]:
+    def confirm_plan(self, plan_id: str, actor: str, plan_hash: Optional[str] = None) -> Dict[str, Any]:
         """Confirm a pending PlanIR and activate ready steps.
 
         Important: confirming a Plan does not create one big lease. Each activated step is
@@ -755,6 +773,14 @@ class FleetSimulator:
                 return {"ok": False, "reason": "plan_not_found"}
             if plan.get("status") not in {"pending_confirmation", "approved", "running"}:
                 return {"ok": False, "reason": f"plan_status_{plan.get('status')}"}
+            if plan_hash and plan.get("plan_hash") and plan_hash != plan.get("plan_hash"):
+                self.log("warn", "TaskGuard", "plan_hash_mismatch", {
+                    "plan_id": plan_id,
+                    "actor": actor,
+                    "expected": plan.get("plan_hash"),
+                    "received": plan_hash,
+                })
+                return {"ok": False, "reason": "plan_hash_mismatch"}
 
             plan["status"] = "approved"
             plan["confirmed_at"] = time.time()
